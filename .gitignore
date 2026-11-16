@@ -1,0 +1,13 @@
+engines/
+engines.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.env
+.env.*
+*.log
+*.gguf
+*.safetensors
+*.ckpt

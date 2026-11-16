@@ -1,0 +1,6 @@
+{
+  "versions": {
+    "cuda-12.8-custom": "D:/llama-builds/cuda-12.8/llama-server.exe",
+    "cuda-13-release": "D:/llama-builds/cuda-13/llama-server.exe"
+  }
+}
