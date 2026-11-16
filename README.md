@@ -50,6 +50,22 @@ The selected build must support the requested command-line options (including `-
 
 The optional image input accepts a **batch of up to four images** (RGB, RGBA, or grayscale). Transparent RGBA pixels are composited over white. Each frame is encoded on the CPU before llama-server starts/reuses, pixels are clamped to [0, 1], and each image is scaled down to fit within **1536 × 1536** pixels while preserving aspect ratio. Inputs larger than 16 megapixels per frame are rejected, and each PNG must be below 10 MB. Vision models require more context memory and may take longer to process image tokens. Switching `mmproj` restarts the owned server to reload the projector; reusing the same model/projector preserves the existing process. A text-only model cannot truly interpret images—select a VLM and its matching projector. The plugin uses llama.cpp's local multimodal inference and does not upload images to third-party services.
 
+## Four-line model loading summary
+
+When the plugin-owned llama-server reports that its model is **ready**, LlamaForge prints **exactly four lines** (illustrative example):
+
+    [LlamaForge] [Model] Qwen3-VL-Q4_K_M.gguf
+    [LlamaForge] [GPU]   CUDA | Auto | 26/33 层 (GPU) | 7 层 (CPU)
+    [LlamaForge] [Vision] 已启用 | mmproj: mmproj-F16.gguf
+    [LlamaForge] [Ready] 加载完成 | 耗时 8.6s
+
+- **Model:** the basename of the successfully started GGUF (never its private directory path).
+- **GPU:** CUDA/Vulkan/CPU when supported by evidence in the llama.cpp startup log, Auto/Manual mode, **actual offloaded layers** parsed from `offloaded X/Y layers to GPU` and the remaining layers. The denominator is llama.cpp's **GPU-offloadable layer count** and can include the output layer; it is not necessarily the model's transformer block count. Values are **not** guessed from the configured slider when logs are missing.
+- **Vision:** reports `已启用` only when the log confirms a vision encoder **and** successful multimodal-model loading. When only `mmproj` was selected, or when multimodal capability is ambiguous, the log says `未确认` instead of falsely reporting successful vision initialization.
+- **Ready:** emitted only after a successful local health check. Startup duration covers the llama-server process loading time, not earlier ComfyUI model eviction.
+
+The summary is printed **once per successful server load** (including a model switch), not for reused processes and not on startup failure. Live Token progress appears separately once generation begins. LlamaForge uses `--verbosity 4` when a build advertises that flag, because the default level may omit layer and vision-encoder details; older builds keep their existing verbosity and may show `未确认`. Startup logs are read through a separate read-only file handle so the writer's position is not changed. The named temporary log is deleted when the owned server is released.
+
 ## Live token progress in the console
 
 During generation, LlamaForge prints a compact, single-line progress bar, refreshed approximately every 250ms using carriage returns:

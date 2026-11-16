@@ -549,6 +549,227 @@ class GpuMemoryTests(unittest.TestCase):
         stop.assert_called_once()
 
 
+
+class LoadReadySummaryTests(unittest.TestCase):
+    def test_load_diagnostics_enable_verbose_four_only_when_supported(self):
+        cfg = config()
+        with_verbose = runtime.LocalLlamaServer._command(
+            cfg, 18080, FLAGS + " -lv, --verbosity, --log-verbosity N   default: 3"
+        )
+        self.assertEqual(with_verbose[with_verbose.index("--verbosity") + 1], "4")
+        legacy = runtime.LocalLlamaServer._command(cfg, 18080, FLAGS)
+        self.assertNotIn("--verbosity", legacy)
+        self.assertNotIn("--verbosity", runtime.LocalLlamaServer._command(
+            cfg, 18080, FLAGS + " --verbosity-high"
+        ))
+
+    def test_four_line_cuda_auto_summary_with_actual_offload(self):
+        report = sys.modules["_llamaforge_tests.load_report"]
+        cfg = config()
+        cfg["gpu_layers_mode"] = "auto"
+        cfg["gpu_layers"] = 999  # Requested slider is ignored in Auto mode.
+        logs = (
+            "llama_model_load: offloading 25 repeating layers to GPU\n"
+            "llama_model_load: offloaded 26/33 layers to GPU\n"
+            "llama_model_load: CUDA0 model buffer size = 3212.12 MiB\n"
+        )
+        lines = report.model_ready_lines(logs, cfg, 8.643)
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[0], "[LlamaForge] [Model] test.gguf")
+        self.assertEqual(lines[1], "[LlamaForge] [GPU]   CUDA | Auto | 26/33 层 (GPU) | 7 层 (CPU)")
+        self.assertIn("[Vision] 未确认", lines[2])
+        self.assertIn("mmproj: 无", lines[2])
+        self.assertEqual(lines[3], "[LlamaForge] [Ready] 加载完成 | 耗时 8.6s")
+        self.assertNotIn(cfg["engine_path"], "\n".join(lines))
+        self.assertNotIn(str(Path(cfg["model_path"]).parent), "\n".join(lines))
+
+    def test_vulkan_manual_vision_confirmed_and_matching_projector(self):
+        report = sys.modules["_llamaforge_tests.load_report"]
+        cfg = config()
+        cfg["gpu_layers_mode"] = "manual"
+        cfg["gpu_layers"] = 24
+        cfg["mmproj_path"] = r"D:\Models\mmproj-qwen3vl-F16.gguf"
+        logs = (
+            "ggml_vulkan: Using Vulkan0\n"
+            "load_tensors: Vulkan0 model buffer size = 2900.00 MiB\n"
+            "load_tensors: offloaded 24/33 layers to GPU\n"
+            "clip_model_loader: has vision encoder\n"
+            "srv    load_model: loaded multimodal model, 'D:\\Models\\mmproj-qwen3vl-F16.gguf'\n"
+        )
+        lines = report.model_ready_lines(logs, cfg, 11.17)
+        self.assertIn("Vulkan | Manual | 24/33 层 (GPU) | 9 层 (CPU)", lines[1])
+        self.assertEqual(lines[2], "[LlamaForge] [Vision] 已启用 | mmproj: mmproj-qwen3vl-F16.gguf")
+        self.assertIn("11.2s", lines[3])
+
+    def test_backend_names_reflect_reported_memory_type(self):
+        report = sys.modules["_llamaforge_tests.load_report"]
+        for native, expected in (("CUDA0", "CUDA"), ("Vulkan0", "Vulkan"),
+                                 ("Metal0", "Metal"), ("ROCm0", "ROCm"),
+                                 ("HIP0", "HIP"), ("SYCL0", "SYCL")):
+            with self.subTest(native=native):
+                logs = ("load_tensors: offloaded 4/32 layers to GPU\n"
+                        + f"load_tensors: {native} model buffer size = 123.0 MiB\n")
+                line = report.model_ready_lines(logs, config(), 1.0)[1]
+                self.assertIn(f"{expected} | Manual | 4/32 层", line)
+
+    def test_cpu_no_gpu_offload_and_unknown_layers_are_truthful(self):
+        report = sys.modules["_llamaforge_tests.load_report"]
+        cfg = config()
+        cfg["gpu_layers"] = 0
+        line = report.model_ready_lines(
+            "load_tensors: offloaded 0/41 layers to GPU\n", cfg, 0.2
+        )[1]
+        self.assertEqual(line, "[LlamaForge] [GPU]   CPU | Manual | 0/41 层 (GPU) | 41 层 (CPU)")
+        line = report.model_ready_lines("", cfg, 0.2)[1]
+        self.assertEqual(line, "[LlamaForge] [GPU]   CPU | Manual | 0 层 (GPU) | CPU 层数未确认")
+        cfg["gpu_layers_mode"] = "auto"
+        cfg["gpu_layers"] = 40
+        line = report.model_ready_lines("ggml_cuda_init: devices found", cfg, 0.2)[1]
+        self.assertIn("GPU 层数未确认", line)
+        self.assertNotIn("40", line)
+        self.assertNotIn("CUDA |", line)
+        self.assertIn("Auto", line)
+
+    def test_multimodal_or_projector_configuration_alone_does_not_claim_vision(self):
+        report = sys.modules["_llamaforge_tests.load_report"]
+        cfg = config()
+        cfg["mmproj_path"] = r"C:\Private\Models\mmproj-f16.gguf"
+        logs = "srv load_model: loaded multimodal model, 'C:\\Private\\Models\\mmproj-f16.gguf'\n"
+        line = report.model_ready_lines(logs, cfg, 1.2)[2]
+        self.assertIn("未确认", line)
+        self.assertNotIn("已启用", line)
+        self.assertIn("mmproj-f16.gguf", line)
+        line = report.model_ready_lines("", cfg, 1.2)[2]
+        self.assertIn("未确认", line)
+        self.assertIn("配置: mmproj-f16.gguf", line)
+        line = report.model_ready_lines("clip_model_loader: has vision encoder\n", cfg, 1.2)[2]
+        self.assertIn("未确认", line)
+        line = report.model_ready_lines(
+            "clip_model_loader: has vision encoder: false\n" + logs, cfg, 1.2
+        )[2]
+        self.assertIn("未启用", line)
+        self.assertNotIn("已启用", line)
+
+    def test_success_prints_exactly_four_lines_once_per_server_load(self):
+        logs = (
+            "llama_model_load: offloaded 11/29 layers to GPU\n"
+            "llama_model_load: CUDA0 model buffer size = 845.00 MiB\n"
+            "clip_model_loader: has vision encoder\n"
+            "srv load_model: loaded multimodal model, '/models/mmproj-F16.gguf'\n"
+        )
+        server = runtime.LocalLlamaServer()
+        server_processes = []
+        seen = []
+
+        def spawn(cmd, **kwargs):
+            proc = FakeProcess()
+            kwargs["stdout"].write(logs.encode("utf-8"))
+            kwargs["stdout"].flush()
+            server_processes.append(proc)
+            return proc
+
+        def http(url, payload=None, timeout=5):
+            if url.endswith("/health"):
+                return {"status": "ok"}
+            return {
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 1}
+            }
+
+        cfg = config()
+        cfg["gpu_layers_mode"] = "auto"
+        cfg["mmproj_path"] = "/models/mmproj-F16.gguf"
+        with mock.patch.object(server, "_supported_flags", return_value=AUTO_FLAGS + " --mmproj"), \
+                mock.patch.object(runtime, "_find_free_port", return_value=18505), \
+                mock.patch.object(runtime, "_http_json", side_effect=http), \
+                mock.patch.object(runtime, "_free_comfy_vram"), \
+                mock.patch.object(runtime.subprocess, "Popen", side_effect=spawn), \
+                mock.patch("builtins.print", side_effect=lambda *args, **kwargs: seen.append(args)):
+            try:
+                args = (cfg, "", "你好", 30, 0.7, 0.9, -1, 10, False)
+                # No real projector is available: _command path validation is
+                # already covered elsewhere; patch the command for this test.
+                with mock.patch.object(server, "_command", return_value=["llama-server"]):
+                    server.generate(*args)
+                    server.generate(*args)
+                    self.assertEqual(len(seen), 1)
+                    lines = seen[0][0].splitlines()
+                    self.assertEqual(len(lines), 4)
+                    self.assertEqual([x.split("]")[1] for x in lines],
+                                     [" [Model", " [GPU", " [Vision", " [Ready"])
+                    self.assertIn("11/29 层 (GPU)", lines[1])
+                    self.assertIn("18 层 (CPU)", lines[1])
+                    self.assertIn("已启用", lines[2])
+                    self.assertIn("mmproj-F16.gguf", lines[2])
+                    cfg2 = dict(cfg, model_name="next-model.gguf",
+                                model_path=r"D:\secret\next-model.gguf")
+                    args2 = (cfg2, "", "你好", 30, 0.7, 0.9, -1, 10, False)
+                    server.generate(*args2)
+                    self.assertEqual(len(seen), 2)
+                    self.assertIn("next-model.gguf", seen[1][0])
+                    self.assertFalse(server_processes[0].alive)
+            finally:
+                server.release()
+
+    def test_failed_model_does_not_print_ready(self):
+        server = runtime.LocalLlamaServer()
+        seen = []
+
+        def spawn(command, **kwargs):
+            kwargs["stdout"].write(b"ggml_vulkan: ErrorOutOfDeviceMemory\n")
+            kwargs["stdout"].flush()
+            proc = FakeProcess()
+            proc.alive = False
+            proc.returncode = 1
+            return proc
+
+        with mock.patch.object(server, "_supported_flags", return_value=FLAGS), \
+                mock.patch.object(runtime, "_find_free_port", return_value=18403), \
+                mock.patch.object(runtime, "_free_comfy_vram"), \
+                mock.patch.object(runtime.subprocess, "Popen", side_effect=spawn), \
+                mock.patch("builtins.print", side_effect=lambda *args, **kwargs: seen.append(args)):
+            try:
+                with self.assertRaisesRegex(RuntimeError, "显存不足"):
+                    server._ensure_running(config())
+                self.assertEqual(seen, [])
+            finally:
+                server.release()
+
+    def test_snapshot_does_not_change_live_log_position_or_lose_tail(self):
+        server = runtime.LocalLlamaServer()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llama-child.log"
+            with path.open("w+b") as logfile:
+                logfile.write(b"A" * 275000)
+                logfile.write(b"B" * 1070000)
+                logfile.write(b"\nload_tensors: offloaded 7/33 layers to GPU\n")
+                logfile.flush()
+                server._log = logfile
+                server._log_path = str(path)
+                original_pos = logfile.tell()
+                text = server._load_log_snapshot()
+                self.assertEqual(logfile.tell(), original_pos)
+                self.assertIn("... log truncated ...", text)
+                self.assertIn("offloaded 7/33", text)
+                self.assertTrue(text.startswith("AAAA"))
+                self.assertIn("offloaded 7/33", server._log_tail())
+                logfile.write(b"FINISHED_WRITE\n")
+                logfile.flush()
+                self.assertTrue(path.read_bytes().endswith(b"FINISHED_WRITE\n"))
+                server._log = None
+                server._log_path = None
+
+    def test_release_cleans_up_named_log_file(self):
+        server = runtime.LocalLlamaServer()
+        server._log = tempfile.NamedTemporaryFile(mode="w+b", delete=False)
+        server._log_path = server._log.name
+        pathname = server._log_path
+        self.assertTrue(Path(pathname).exists())
+        server.release()
+        self.assertIsNone(server._log)
+        self.assertIsNone(server._log_path)
+        self.assertFalse(Path(pathname).exists())
+
 class HttpRoundTripTests(unittest.TestCase):
     def test_real_local_http_transport_and_loading_health(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

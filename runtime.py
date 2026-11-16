@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from .progress import TokenProgress
+from .load_report import model_ready_lines
 from .vision import chat_content
 
 
@@ -186,18 +187,52 @@ class LocalLlamaServer:
         self._lock = threading.RLock()
         self._process = None
         self._log = None
+        self._log_path = None
         self._signature = None
         self._port = None
         self._help_cache = {}
 
-    def _log_tail(self):
-        if self._log is None:
+    def _load_log_snapshot(self):
+        """Read bounded startup logs through a separate read-only file handle.
+
+        On Windows even a read-only mmap can change the inherited writer's file
+        position. A separate handle to a named temp file avoids that behavior.
+        """
+        if self._log_path is None:
             return ""
-        self._log.flush()
-        self._log.seek(0, os.SEEK_END)
-        end = self._log.tell()
-        self._log.seek(max(end - 3500, 0))
-        return self._log.read().decode("utf-8", errors="replace").strip()
+        try:
+            if self._log is not None:
+                self._log.flush()
+            head_size, tail_size = 256 * 1024, 1024 * 1024
+            with open(self._log_path, "rb") as reader:
+                reader.seek(0, os.SEEK_END)
+                size = reader.tell()
+                if size <= head_size + tail_size:
+                    reader.seek(0)
+                    data = reader.read()
+                else:
+                    reader.seek(0)
+                    head = reader.read(head_size)
+                    reader.seek(size - tail_size)
+                    data = head + b"\n... log truncated ...\n" + reader.read(tail_size)
+            return data.decode("utf-8", errors="replace")
+        except (OSError, ValueError):
+            # No logging issue should prevent the loaded server from responding.
+            return ""
+
+    def _log_tail(self):
+        if self._log_path is None:
+            return ""
+        try:
+            if self._log is not None:
+                self._log.flush()
+            with open(self._log_path, "rb") as reader:
+                reader.seek(0, os.SEEK_END)
+                end = reader.tell()
+                reader.seek(max(end - 3500, 0))
+                return reader.read().decode("utf-8", errors="replace").strip()
+        except (OSError, ValueError):
+            return ""
 
     def _stop(self):
         process = self._process
@@ -215,8 +250,17 @@ class LocalLlamaServer:
             else:
                 process.wait()
         if self._log is not None:
-            self._log.close()
-            self._log = None
+            try:
+                self._log.close()
+            finally:
+                self._log = None
+        if self._log_path is not None:
+            try:
+                os.unlink(self._log_path)
+            except FileNotFoundError:
+                pass
+            finally:
+                self._log_path = None
 
     def release(self):
         with self._lock:
@@ -296,6 +340,12 @@ class LocalLlamaServer:
         if "--reasoning" not in flags:
             raise RuntimeError("LlamaForge: selected llama.cpp version does not support --reasoning on/off.")
         cmd.extend(("--reasoning", "on" if think else "off"))
+        # llama.cpp's default verbosity=3 hides actual GPU offload counts
+        # and the vision-encoder flag on several modern builds. Verbosity 4
+        # exposes them without requiring changes to model inference options.
+        # Keep older builds compatible if the option is not advertised.
+        if re.search(r"(?:^|\s)--verbosity(?=\s|,|$)", flags):
+            cmd.extend(("--verbosity", "4"))
         mmproj = config.get("mmproj_path")
         if mmproj:
             if "--mmproj" not in flags:
@@ -334,11 +384,13 @@ class LocalLlamaServer:
         if config["memory_mode"] != "performance":
             _free_comfy_vram()
 
-        self._log = tempfile.TemporaryFile(mode="w+b")
+        self._log = tempfile.NamedTemporaryFile(mode="w+b", delete=False)
+        self._log_path = self._log.name
         options = {"stdin": subprocess.DEVNULL, "stdout": self._log, "stderr": subprocess.STDOUT}
         if os.name == "nt":
             options["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
+            started_at = time.monotonic()
             self._process = subprocess.Popen(command, **options)
             self._port = port
             deadline = time.monotonic() + config["startup_timeout"]
@@ -349,6 +401,11 @@ class LocalLlamaServer:
                     health = _http_json(f"http://127.0.0.1:{port}/health", timeout=1)
                     if health.get("status") == "ok" and self._process.poll() is None:
                         self._signature = identity
+                        lines = model_ready_lines(
+                            self._load_log_snapshot(), config,
+                            time.monotonic() - started_at,
+                        )
+                        print("\n".join(lines), flush=True)
                         return
                 except (urllib.error.URLError, TimeoutError, ValueError):
                     pass

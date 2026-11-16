@@ -227,6 +227,26 @@ ComfyUI/models/llamaforge/
 - 每张编码后的 PNG 最大 **10 MiB**；图片在本机 CPU 上编码并以 base64 数据传给本地服务。
 - 图片输入会占用额外上下文与计算资源。纯文本模型不会因连接了图片就自动获得视觉理解能力。
 
+## 模型加载成功后的四行摘要
+
+当本插件启动的 llama-server **真正加载成功**后，ComfyUI 控制台会输出 **四行紧凑日志**：
+
+```text
+[LlamaForge] [Model] Qwen3-VL-Q4_K_M.gguf
+[LlamaForge] [GPU]   CUDA | Auto | 26/33 层 (GPU) | 7 层 (CPU)
+[LlamaForge] [Vision] 已启用 | mmproj: mmproj-F16.gguf
+[LlamaForge] [Ready] 加载完成 | 耗时 8.6s
+```
+
+> 上面是**格式示例**，不是当前机器的实际模型、层数或耗时。
+
+- **Model：** 实际成功启动的模型文件名，不输出本机私有目录路径。
+- **GPU：** 从 llama.cpp 加载日志的 `offloaded X/Y layers to GPU` 读取**实际卸载层数**，结合模型缓冲区日志判断 CUDA/Vulkan/CPU 后端。分母是 llama.cpp 报告的**可卸载层数**，某些架构包含输出层，不一定等于模型 Transformer Block 数。读取不到则显示“未确认”，不会直接拿 `gpu_layers` 配置值冒充实际层数。
+- **Vision：** 只有在加载日志同时确认视觉编码器和多模态模型加载成功时才显示“已启用”；仅配置了 `mmproj`，或日志只有模糊的多模态标记时显示“未确认”。已确认的投影器仅显示文件名。
+- **Ready：** 本地服务健康检查成功后才输出，耗时从启动 llama-server 进程算起，不包含此前 ComfyUI 模型卸载时间。
+
+同一个模型服务被复用时**不重复输出**；切换模型并成功重新加载后会再次输出四行；加载失败不会错误输出 Ready。兼容的 llama.cpp 引擎会自动启用 `--verbosity 4` 以记录真实层数与视觉编码器信息；旧版引擎若不支持该参数会保留原日志级别，此时部分字段可能显示“未确认”。使用独立只读句柄读取加载日志，不改变正在运行的 llama-server 写入日志位置；本扩展释放服务时清理临时日志文件。生成时的 Token 进度条仍照常显示。
+
 ## 生成进度条与统计
 
 生成期间，插件在 ComfyUI 控制台约每 **250 ms** 原地刷新一行：
