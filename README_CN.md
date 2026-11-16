@@ -185,7 +185,7 @@ ComfyUI/models/llamaforge/
 }
 ```
 
-支持纯 JSON、Markdown 代码块以及前后带说明文字的 JSON。如果缺字段或字段不是字符串，则报错。适合连接至后续文生图工作流。
+支持纯 JSON、Markdown 代码块及前后带说明文字的 JSON。新增**三级容错**：① `strict` 严格解析；② `repaired` 尝试修复裸换行、智能引号和尾逗号；③ `fallback` 针对固定的 `rewritten_prompt`、`wh_ratio` 两个字段恢复长提示词内未转义的双引号（如 `"ChatGPT"`）。控制台会输出 `[LlamaForge JSON] parsed with strict/repaired/fallback mode` 便于诊断。保持原来的两个 `STRING` 输出接口，无需额外安装 `json-repair`。如果缺字段、字段类型错误、对象没有正确闭合或无法安全恢复，仍会报错；解析器不会擅自补完模型缺失的内容。适合连接至后续文生图工作流。
 
 ## 快速上手：文本生成
 

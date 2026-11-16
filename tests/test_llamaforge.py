@@ -987,6 +987,85 @@ class PromptJSONParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no valid JSON"):
             self.node.parse('Here is the JSON: {"rewritten_prompt": "A", "wh_ratio": "3:2"')
 
+    def test_user_reported_bare_quote_and_long_prompt(self):
+        value = r'''{"rewritten_prompt": "A square graphic on the off-white background (#F7F5EF) features large black Chinese text introduced by \"ChatGPT\" as a bold, sans-serif-style main headline and subheading directly below it reading exactly: "(an artificial intelligence created\nby OpenAi to communicate\nto users...and helping them solve problems). The two lines are horizontally arranged from left to right in standard written orientation. Directly adjacent near the opening of this text is \"ChatGPT\" accompanied by a small outline-style knot logo representing an AI node or neural-network symbol, drawn with dark gray-black strokes and aligned vertically around the first character area; it sits immediately beside ChatGPT as identifying iconography rather than separate decoration in minimalist style without borders. The headline occupies most of the central visual weight but is positioned slightly above center within a very spacious composition featuring OpenAi elements integrated into this minimal layout that has no border or decorative frame, with large empty margins across all sides (top edge), especially on both left and right edges through negative space alone maintaining minimalist style without borders/decorative frames. The background surface appears matte paper-like in color #F7F5EF to warm beige-gray (#E9EAEB) toward the corners where a subtle vignette or soft shadow creates depth around image boundaries preserving edge definition while keeping everything clean and restrained, with no border present; it has fine grain texture visible upon close inspection. A faint vertical banding pattern runs down portions of background behind text including ChatGPT/OpenAi elements without interrupt legibility but adding slight atmospheric variation within minimalist style devoid at edges entirely free from borders or ornamental frames ensuring clarity despite softness and tonal shifts across entire field absent any enclosing boundary lines; the overall design is minimal, quiet in mood emphasizing typography rather than imagery.", "wh_ratio": "1:1"}'''
+        with mock.patch("builtins.print") as logged:
+            prompt, ratio = self.node.parse(value)
+        self.assertEqual(ratio, "1:1")
+        self.assertIn('introduced by "ChatGPT"', prompt)
+        self.assertIn('reading exactly: "(an artificial intelligence created\nby OpenAi', prompt)
+        self.assertIn("fine grain texture visible upon close inspection.", prompt)
+        self.assertTrue(prompt.endswith("emphasizing typography rather than imagery."))
+        logged.assert_called_once_with("[LlamaForge JSON] parsed with fallback mode")
+
+    def test_common_repairs_and_reversed_field_order(self):
+        cases = [
+            ('{"rewritten_prompt": "line1\nline2", "wh_ratio": "4:3"}', ("line1\nline2", "4:3")),
+            ('{"rewritten_prompt": "landscape", "wh_ratio": "16:9",}', ("landscape", "16:9")),
+            ('{“rewritten_prompt”: “A ‘fine’ sign”, “wh_ratio”: “1:1”}', ("A ‘fine’ sign", "1:1")),
+            ("{'rewritten_prompt': 'A scene', 'wh_ratio': '1:1'}", ("A scene", "1:1")),
+            ('{"wh_ratio": "9:16", "rewritten_prompt": "A "ChatGPT" logo"}',
+             ('A "ChatGPT" logo', "9:16")),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value), mock.patch("builtins.print") as logged:
+                self.assertEqual(self.node.parse(value), expected)
+                self.assertIn(
+                    logged.call_args.args[0],
+                    ("[LlamaForge JSON] parsed with repaired mode",
+                     "[LlamaForge JSON] parsed with fallback mode"),
+                )
+
+    def test_internal_quoted_ratio_not_treated_as_last_field(self):
+        text = r'''{"rewritten_prompt": "Sign displays , \"wh_ratio\": \"9:16\" next to "ChatGPT" logo", "wh_ratio": "1:1"}'''
+        prompt, ratio = self.node.parse(text)
+        self.assertEqual(ratio, "1:1")
+        self.assertIn('"wh_ratio": "9:16"', prompt)
+        self.assertIn('"ChatGPT" logo', prompt)
+
+    def test_repair_preserves_other_objects_and_logs_strict(self):
+        text = 'ignore {"metadata": 1} followed by {"rewritten_prompt": "Quote "OpenAi" mark.", "wh_ratio": "1:1"}'
+        self.assertEqual(self.node.parse(text), ('Quote "OpenAi" mark.', "1:1"))
+        exact = json.dumps({"rewritten_prompt": 'A "real" quote', "wh_ratio": " 3:2 "})
+        with mock.patch("builtins.print") as logged:
+            self.assertEqual(self.node.parse(exact), ('A "real" quote', "3:2"))
+        logged.assert_called_once_with("[LlamaForge JSON] parsed with strict mode")
+
+    def test_incomplete_and_nonstring_objects_still_fail(self):
+        for text in (
+            '{"rewritten_prompt": "A "broken" quote", "wh_ratio": "1:1"',
+            '{"rewritten_prompt": [1,2], "wh_ratio": "1:1"}',
+            '{"rewritten_prompt": "Text", "wh_ratio": 1.5}',
+        ):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                self.node.parse(text)
+        with self.assertRaisesRegex(ValueError, "safety limit"):
+            self.node.parse(" " * 2_000_001)
+    def test_fallback_keeps_escaped_newline_and_escaped_quote(self):
+        value = r'''{"rewritten_prompt": "Look at \"ChatGPT\" and "OpenAi"; line1\nline2, literal \\n", "wh_ratio": "1:1"}'''
+        prompt, ratio = self.node.parse(value)
+        self.assertEqual(ratio, "1:1")
+        self.assertEqual(prompt, 'Look at "ChatGPT" and "OpenAi"; line1\nline2, literal \\n')
+
+    def test_user_sample_does_not_change_curly_quotes_inside_prompt(self):
+        value = '{"rewritten_prompt": "A “minimalist” poster with "ChatGPT" title.", "wh_ratio": "1:1"}'
+        prompt, ratio = self.node.parse(value)
+        self.assertEqual((prompt, ratio), ('A “minimalist” poster with "ChatGPT" title.', "1:1"))
+
+    def test_invalid_recovered_field_cannot_be_pulled_from_next_object(self):
+        value = (
+            '{"rewritten_prompt": "first with "bad" quotes"}\n'
+            '{"wh_ratio": "1:1"}'
+        )
+        with self.assertRaises(ValueError):
+            self.node.parse(value)
+
+    def test_valid_json_with_trailing_prose_still_accepted(self):
+        self.assertEqual(
+            self.node.parse('Result: {"rewritten_prompt": "Text", "wh_ratio": "maybe"} junk }'),
+            ("Text", "maybe"),
+        )
+
     def test_comfy_interface_and_socket_types(self):
         node_type = package.NODE_CLASS_MAPPINGS["LlamaForgePromptJSONParser"]
         self.assertEqual(node_type.FUNCTION, "parse")
