@@ -346,7 +346,7 @@ class LocalLlamaServer:
         # Keep older builds compatible if the option is not advertised.
         if re.search(r"(?:^|\s)--verbosity(?=\s|,|$)", flags):
             cmd.extend(("--verbosity", "4"))
-        mmproj = config.get("mmproj_path")
+        mmproj = config.get("mmproj_path") if config.get("load_mmproj", True) else None
         if mmproj:
             if "--mmproj" not in flags:
                 raise RuntimeError("LlamaForge: selected llama.cpp version does not support --mmproj.")
@@ -363,7 +363,7 @@ class LocalLlamaServer:
         identity = (
             str(config["engine_path"]),
             str(config["model_path"]),
-            config.get("mmproj_path"),
+            config.get("mmproj_path") if config.get("load_mmproj", True) else None,
             config["context_size"],
             config.get("gpu_layers_mode", "manual"),
             config["gpu_layers"] if config.get("gpu_layers_mode", "manual") == "manual" else None,

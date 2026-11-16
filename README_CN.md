@@ -111,22 +111,28 @@ ComfyUI/models/llamaforge/
 
 用于选择推理引擎、GGUF、投影器和加载配置。该节点自身**不会加载权重**，真正的模型启动发生在生成时。
 
-| 输入参数 | 默认值 | 作用 |
+| 输入参数（按节点界面顺序） | 默认值 | 作用 |
 |---|---|---|
-| `engine` | 已发现引擎列表 | 指定 llama-server 版本 |
-| `model` | 已发现 GGUF 列表 | 指定模型 |
-| `mmproj` | `(auto / embedded)` | 可选独立视觉投影器 |
-| `memory_mode` | `balanced` | 显存管理策略 |
-| `context_size` | `8192` | 上下文窗口，越大越可能占用更多 KV 缓存 |
-| `gpu_layers` | `40` | Manual 模式下的 GPU 卸载层数；`0` 为 CPU 推理 |
-| `gpu_layers_mode` | `manual` | 可选：`manual` 使用固定 GPU 层数，`auto` 启用 llama.cpp 自动显存适配 |
+| `engine` | 已发现引擎列表 | 选择 llama-server 版本 |
+| `model` | 已发现 GGUF 列表 | 选择文本或视觉 GGUF |
+| **`load_mmproj`** | **`true`** | 是否加载所选**独立 mmproj**；关闭则不传 `--mmproj` |
+| `mmproj` | `(auto / embedded)` | 选择独立多模态投影器；仅在开关开启且选中具体文件时加载 |
+| `gpu_layers_mode` | `manual` | 选择固定层数（Manual）或自动显存适配（Auto） |
+| `gpu_layers` | `40` | Manual 模式下的 GPU 层数；`0` 为 CPU 推理 |
+| `memory_mode` | `balanced` | 显存与进程生命周期策略 |
+| `context_size` | `8192` | 上下文窗口，会影响 KV Cache 占用 |
+| `kv_cache` | `f16` | KV 缓存精度：`f16`、`q8_0`、`q4_0` |
 | `threads` | `6` | CPU 线程数 |
 | `batch_size` | `2048` | 逻辑批处理大小 |
-| `ubatch_size` | `256` | 物理微批处理大小，不能大于 `batch_size` |
-| `kv_cache` | `f16` | KV 缓存精度，可选 `f16`、`q8_0`、`q4_0` |
+| `ubatch_size` | `256` | 微批处理大小，不得超过 `batch_size` |
 | `startup_timeout` | `300` 秒 | 模型服务启动等待时间 |
 
 `mmproj` 默认的 `(auto / embedded)` 只是**不显式传入** `--mmproj`。如果模型需要独立投影器，应明确选择与该 GGUF 配套的 mmproj；插件不会替你下载或匹配模型文件。
+**独立 mmproj 加载开关：** `load_mmproj=true`（默认）保持旧版行为：仅当 `mmproj` 选择了实际文件时传递 `--mmproj`；`load_mmproj=false` 时，即使下拉框仍选着某个文件，也不会解析或加载它，适合纯文本推理和跳过独立投影器的测试。关闭开关**并不禁止**模型本身的内嵌视觉能力，也不会禁用 `Generate.image`。当开关关闭时修改 `mmproj` 选项不会触发模型重载；重新开启开关并实际使用投影器时会重载。
+
+**旧工作流兼容：** 节点控件按「引擎/模型 → 视觉 → GPU/显存 → 上下文/KV → CPU/批处理 → 启动等待」重新排序。ComfyUI 的 UI 工作流常按位置保存控件值，插件新增了自动迁移脚本，在加载旧版 10～12 项控件的 `LlamaForge · Model & Engine` 工作流时按字段含义重新排列，不会把旧的上下文数值误当作 GPU 层数；旧工作流默认保持 `load_mmproj=true`。API 工作流继续按原有字段名称传参。建议升级后首次打开旧工作流时核对控件值并重新保存。
+
+
 
 ### GPU Layers：Auto 与 Manual
 
@@ -198,7 +204,7 @@ ComfyUI/models/llamaforge/
                  └── reasoning
 ```
 
-1. 选择 `engine` 与 `model`，纯文本模型不需要配置独立 mmproj。
+1. 选择 `engine` 与 `model`，纯文本模型可关闭 `load_mmproj`，无需加载独立投影器。
 2. 在 Generate 输入 `prompt`，按需调整采样参数。
 3. 点击 ComfyUI 的 **Queue Prompt（运行队列）**。
 4. 在 `text` 输出查看结果；如需清理显存，可启用 `release_after`。
@@ -214,7 +220,7 @@ ComfyUI/models/llamaforge/
                               prompt: 描述这张图片
 ```
 
-1. 在 Model & Engine 中选择**支持视觉的 GGUF**，并按模型要求选择匹配的 `mmproj`。
+1. 在 Model & Engine 中选择**支持视觉的 GGUF**，将 `load_mmproj` 设为 `true`，并按模型要求选择匹配的 `mmproj`（如视觉能力已内嵌则按模型说明配置）。
 2. 将 ComfyUI 的 **Load Image** 节点的 `IMAGE` 输出接到 `Generate.image`。
 3. 在 `prompt` 填写“描述图片里的人物和场景”等问题。
 4. 运行队列，从 `text` 查看模型回答。

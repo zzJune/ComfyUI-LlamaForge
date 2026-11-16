@@ -20,21 +20,30 @@ class LlamaForgeLoader:
         engines = list(available_engines()) or [NO_ENGINE]
         models = available_models() or [NO_MODEL]
         return {
+            # Keep only engine/model required: older API workflows use their
+            # original named parameters, while the frontend presents all
+            # settings in the new grouped order below.
             "required": {
                 "engine": (engines,),
                 "model": (models,),
-                "memory_mode": (["balanced", "performance", "low_vram"],),
-                "context_size": ("INT", {"default": 8192, "min": 512, "max": 262144, "step": 512}),
+            },
+            "optional": {
+                # Vision controls
+                "load_mmproj": ("BOOLEAN", {"default": True}),
+                "mmproj": ([NO_PROJECTOR, *available_projectors()],),
+                # GPU / VRAM controls
+                "gpu_layers_mode": (["manual", "auto"], {"default": "manual"}),
                 "gpu_layers": ("INT", {"default": 40, "min": 0, "max": 999, "step": 1}),
+                "memory_mode": (["balanced", "performance", "low_vram"],),
+                # Context / KV
+                "context_size": ("INT", {"default": 8192, "min": 512, "max": 262144, "step": 512}),
+                "kv_cache": (["f16", "q8_0", "q4_0"],),
+                # CPU / batching
                 "threads": ("INT", {"default": 6, "min": 1, "max": 128}),
                 "batch_size": ("INT", {"default": 2048, "min": 32, "max": 8192, "step": 32}),
                 "ubatch_size": ("INT", {"default": 256, "min": 32, "max": 4096, "step": 32}),
-                "kv_cache": (["f16", "q8_0", "q4_0"],),
+                # Timeouts
                 "startup_timeout": ("INT", {"default": 300, "min": 15, "max": 1800}),
-            },
-            "optional": {
-                "gpu_layers_mode": (["manual", "auto"], {"default": "manual"}),
-                "mmproj": ([NO_PROJECTOR, *available_projectors()],),
             },
         }
 
@@ -43,11 +52,14 @@ class LlamaForgeLoader:
     FUNCTION = "configure"
     CATEGORY = "LlamaForge"
 
-    def configure(self, engine, model, memory_mode, context_size, gpu_layers,
-                  threads, batch_size, ubatch_size, kv_cache, startup_timeout,
-                  mmproj=NO_PROJECTOR, gpu_layers_mode="manual"):
+    def configure(self, engine, model, memory_mode="balanced", context_size=8192,
+                  gpu_layers=40, threads=6, batch_size=2048, ubatch_size=256,
+                  kv_cache="f16", startup_timeout=300, mmproj=NO_PROJECTOR,
+                  gpu_layers_mode="manual", load_mmproj=True):
         if gpu_layers_mode not in ("manual", "auto"):
             raise ValueError("LlamaForge: gpu_layers_mode must be manual or auto.")
+        if not isinstance(load_mmproj, bool):
+            raise ValueError("LlamaForge: load_mmproj must be a boolean.")
         if ubatch_size > batch_size:
             raise ValueError("LlamaForge: ubatch_size must be no larger than batch_size.")
         config = {
@@ -64,7 +76,9 @@ class LlamaForgeLoader:
             "ubatch_size": ubatch_size,
             "kv_cache": kv_cache,
             "startup_timeout": startup_timeout,
-            "mmproj_path": str(resolve_projector(mmproj)) if mmproj != NO_PROJECTOR else None,
+            "load_mmproj": load_mmproj,
+            "mmproj_path": (str(resolve_projector(mmproj))
+                            if load_mmproj and mmproj != NO_PROJECTOR else None),
         }
         return (config,)
 

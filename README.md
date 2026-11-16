@@ -21,10 +21,24 @@ Do not put large models under custom_nodes or inside the engines directory. The 
 
 ## Nodes
 
-- **Model & Engine:** Chooses a discovered build, one local GGUF, optional matching `mmproj` vision projector, memory mode, **GPU Layers Auto/Manual**, context, CPU threads, batches and KV cache format. It only returns configuration and does not load weights until needed.
+- **Model & Engine:** Chooses a discovered build, one local GGUF, explicit `load_mmproj` toggle and optional matching `mmproj` vision projector, memory mode, **GPU Layers Auto/Manual**, context, CPU threads, batches and KV cache format. It only returns configuration and does not load weights until needed.
 - **Generate:** An output node that starts/reuses the owned llama-server, sends an SSE-streamed text or image+text chat request, and emits text, JSON statistics, and an optional `reasoning` string. Its optional `image` socket accepts ComfyUI `IMAGE` tensors for visual understanding. Its results are recorded in ComfyUI execution history. The optional `think` boolean defaults to `true` for existing workflows. Set `think=false` to request non-thinking generation on models that support switching reasoning mode. Switching `think` restarts the owned llama-server and reloads the GGUF model; subsequent runs with the same mode reuse it. Runs on every queue execution rather than relying on ComfyUI's output cache. `release_after` allows VRAM to be reclaimed before subsequent image/video processing.
 - **Release VRAM:** An output node that terminates only the process created by this extension. Connect its optional after_text input to generation output to force graph execution order. Its status is recorded in ComfyUI execution history.
 - **Parse Prompt JSON:** Accepts a JSON string such as `{"rewritten_prompt": "A cinematic landscape", "wh_ratio": "3:2"}`, including JSON wrapped in Markdown code fences or explanatory text, and returns two independent `STRING` sockets: `rewritten_prompt` and `wh_ratio`. Connect the `text` output from **Generate** to its `json_text` input, then use each field in downstream image-generation nodes. Parsing uses **strict → repaired → fallback** stages: standard JSON first, then raw-newline/smart-quote/trailing-comma syntax recovery, then conservative extraction of the two expected fields to recover unescaped inner quotes in long prompts (including literal text like `"ChatGPT"`). The console prints `[LlamaForge JSON] parsed with strict/repaired/fallback mode`. Missing keys, invalid field types and unrecoverable or incomplete JSON still raise actionable errors. No external `json-repair` dependency is required. The node does not execute llama.cpp itself.
+
+### Load mmproj switch and Model & Engine widget order
+
+The new `load_mmproj` Boolean (**default: true**) controls whether an **external** projector is passed to llama.cpp. With the switch disabled, a selected `mmproj` is deliberately ignored: no `--mmproj` flag, no projector path validation, and changing the dropdown does not restart an already-running server. Re-enabling it with a selected projector reloads the server. Old workflows and config dictionaries without the switch behave exactly as before (enabled). The switch does **not** disable vision capabilities embedded in the GGUF, nor does it remove the `Generate.image` socket.
+
+**Model & Engine** widgets now appear in this order:
+
+```text
+engine → model → load_mmproj → mmproj → gpu_layers_mode → gpu_layers
+       → memory_mode → context_size → kv_cache → threads
+       → batch_size → ubatch_size → startup_timeout
+```
+
+The first two fields remain required; the rest are optional with the same defaults. Existing API workflows can continue using the old **named** keys or positional Python arguments. For older **UI workflow JSON**, the included frontend compatibility hook migrates legacy positional widget arrays (10–12 values) to the new order when loading a graph. In case of unrecognized/custom widget layouts, values are left untouched rather than guessed; check displayed parameters after an upgrade and save your workflow again.
 
 ### GPU Layers: automatic fitting or manual offload
 
@@ -44,7 +58,7 @@ The selected build must support the requested command-line options (including `-
 ## Vision-language models (VLM) and image inputs
 
 1. Place a vision-capable GGUF model (e.g., `Sakura-PE-I2I-Uncensored-Q8_0-8.87GiB.gguf`) in one of the configured ComfyUI `LLM` folders. If the model requires a separate multimodal projector, place the **matching** `*mmproj*.gguf` in an `LLM` folder as well.
-2. In **LlamaForge · Model & Engine**, select the vision GGUF model and choose its corresponding optional `mmproj` entry. The default `(auto / embedded)` does not explicitly pass a projector; use it only when your model has an embedded projector or llama.cpp can discover a matching local projector by itself. This plugin does not download model weights or projectors.
+2. In **LlamaForge · Model & Engine**, select the vision GGUF model, keep `load_mmproj=true`, and choose its corresponding optional `mmproj` entry when an external projector is required. The default `(auto / embedded)` does not explicitly pass a projector; use it only when your model has an embedded projector or llama.cpp can discover a matching local projector by itself. This plugin does not download model weights or projectors.
 3. Connect **Load Image → IMAGE** to **LlamaForge · Generate → image**, and enter an image question in `prompt`. The node sends the prompt and PNG image together using OpenAI-compatible `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` content parts.
 4. Queue Prompt and use the existing `text`, `stats_json` and `reasoning` outputs as usual. Without an image, the request is unchanged plain text.
 

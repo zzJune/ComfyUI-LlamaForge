@@ -3,6 +3,8 @@
 from .nodes import LlamaForgeGenerate, LlamaForgeLoader, LlamaForgeRelease
 from .json_parser import LlamaForgePromptJSONParser
 
+WEB_DIRECTORY = "./web"
+
 NODE_CLASS_MAPPINGS = {
     "LlamaForgeLoader": LlamaForgeLoader,
     "LlamaForgeGenerate": LlamaForgeGenerate,

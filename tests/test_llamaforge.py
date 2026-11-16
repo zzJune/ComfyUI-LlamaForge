@@ -337,7 +337,7 @@ AUTO_FLAGS = FLAGS.replace("--n-gpu-layers", "") + """
 class GpuMemoryTests(unittest.TestCase):
     def test_loader_auto_manual_input_and_old_workflow_compatibility(self):
         inputs = nodes.LlamaForgeLoader.INPUT_TYPES()
-        self.assertEqual(inputs["required"]["gpu_layers"][1]["default"], 40)
+        self.assertEqual(inputs["optional"]["gpu_layers"][1]["default"], 40)
         self.assertEqual(inputs["optional"]["gpu_layers_mode"][0], ["manual", "auto"])
         self.assertEqual(inputs["optional"]["gpu_layers_mode"][1]["default"], "manual")
         engine = Path(__file__).resolve()
@@ -548,6 +548,136 @@ class GpuMemoryTests(unittest.TestCase):
         self.assertIn("CUDA error: out of memory", text)
         stop.assert_called_once()
 
+
+
+
+class ModelEngineMmprojToggleTests(unittest.TestCase):
+    EXPECTED_WIDGET_ORDER = [
+        "engine", "model", "load_mmproj", "mmproj",
+        "gpu_layers_mode", "gpu_layers", "memory_mode",
+        "context_size", "kv_cache", "threads",
+        "batch_size", "ubatch_size", "startup_timeout",
+    ]
+
+    def test_grouped_loader_widget_schema_and_default(self):
+        settings = nodes.LlamaForgeLoader.INPUT_TYPES()
+        self.assertEqual(list(settings["required"]), ["engine", "model"])
+        self.assertEqual(
+            list(settings["required"]) + list(settings["optional"]),
+            self.EXPECTED_WIDGET_ORDER,
+        )
+        self.assertEqual(settings["optional"]["load_mmproj"], ("BOOLEAN", {"default": True}))
+        self.assertEqual(settings["optional"]["gpu_layers_mode"][1]["default"], "manual")
+        self.assertEqual(settings["optional"]["mmproj"][0][0], registry.NO_PROJECTOR)
+        self.assertEqual(package.WEB_DIRECTORY, "./web")
+
+    def test_old_named_and_positional_loader_api_are_compatible(self):
+        reference = Path(__file__).resolve()
+        with mock.patch.object(nodes, "resolve_engine", return_value=reference), \
+                mock.patch.object(nodes, "resolve_model", return_value=reference), \
+                mock.patch.object(nodes, "resolve_projector", return_value=reference) as resolve:
+            loader = nodes.LlamaForgeLoader()
+            settings = ("engine", "model", "balanced", 4096, 20, 6, 512, 256, "q8_0", 300)
+            legacy = loader.configure(*settings, mmproj="mmproj.gguf")[0]
+            self.assertTrue(legacy["load_mmproj"])
+            self.assertEqual(legacy["mmproj_path"], str(reference))
+            resolve.assert_called_once_with("mmproj.gguf")
+            cfg = loader.configure(engine="engine", model="model")[0]
+            self.assertTrue(cfg["load_mmproj"])
+            self.assertIsNone(cfg["mmproj_path"])
+            self.assertEqual(cfg["gpu_layers"], 40)
+
+    def test_disabled_projector_is_not_resolved_or_loaded(self):
+        reference = Path(__file__).resolve()
+        with mock.patch.object(nodes, "resolve_engine", return_value=reference), \
+                mock.patch.object(nodes, "resolve_model", return_value=reference), \
+                mock.patch.object(nodes, "resolve_projector") as resolve:
+            loader = nodes.LlamaForgeLoader()
+            disabled = loader.configure("engine", "model", mmproj="unavailable.gguf", load_mmproj=False)[0]
+            self.assertIsNone(disabled["mmproj_path"])
+            self.assertFalse(disabled["load_mmproj"])
+            resolve.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "load_mmproj"):
+                loader.configure("engine", "model", load_mmproj="false")
+
+    def test_effective_mmproj_command_respects_switch_and_legacy_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mmproj-f16.gguf"
+            path.write_bytes(b"fake")
+            cfg = config()
+            cfg["mmproj_path"] = str(path)
+            cmd = runtime.LocalLlamaServer._command(cfg, 18203, FLAGS + " --mmproj")
+            self.assertEqual(cmd[cmd.index("--mmproj") + 1], str(path))
+            cfg["load_mmproj"] = False
+            cfg["mmproj_path"] = str(path.with_name("missing.gguf"))
+            cmd = runtime.LocalLlamaServer._command(cfg, 18203, FLAGS)
+            self.assertNotIn("--mmproj", cmd)
+            cfg["load_mmproj"] = True
+            with self.assertRaises(FileNotFoundError):
+                runtime.LocalLlamaServer._command(cfg, 18203, FLAGS + " --mmproj")
+
+    def test_disabling_mmproj_does_not_fake_vision_config(self):
+        report = sys.modules["_llamaforge_tests.load_report"]
+        cfg = config()
+        cfg["mmproj_path"] = r"D:\models\projector.gguf"
+        cfg["load_mmproj"] = False
+        result = report.model_ready_lines("", cfg, 1.0)[2]
+        self.assertIn("mmproj: 无", result)
+        self.assertNotIn("projector.gguf", result)
+
+    def test_toggle_restart_and_disabled_selection_does_not_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "mmproj-A.gguf"
+            b = Path(tmp) / "mmproj-B.gguf"
+            a.touch()
+            b.touch()
+            processes = []
+            launches = []
+
+            def popen(command, **kwargs):
+                launches.append(command)
+                process = FakeProcess()
+                processes.append(process)
+                return process
+
+            def http(url, payload=None, timeout=5):
+                if url.endswith("/health"):
+                    return {"status": "ok"}
+                return {
+                    "choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 1},
+                }
+
+            own = runtime.LocalLlamaServer()
+            try:
+                with mock.patch.object(own, "_supported_flags", return_value=FLAGS + " --mmproj"), \
+                        mock.patch.object(runtime, "_find_free_port", return_value=18207), \
+                        mock.patch.object(runtime, "_http_json", side_effect=http), \
+                        mock.patch.object(runtime, "_free_comfy_vram"), \
+                        mock.patch.object(runtime.subprocess, "Popen", side_effect=popen):
+                    params = ("", "你好", 16, 0.7, 0.9, -1, 10, False)
+                    cfg = dict(config(), mmproj_path=str(a), load_mmproj=False)
+                    own.generate(cfg, *params)
+                    cfg2 = dict(cfg, mmproj_path=str(b))
+                    own.generate(cfg2, *params)
+                    self.assertEqual(len(launches), 1)
+                    self.assertNotIn("--mmproj", launches[0])
+
+                    enabled = dict(cfg2, load_mmproj=True)
+                    own.generate(enabled, *params)
+                    self.assertEqual(len(launches), 2)
+                    self.assertEqual(launches[1][launches[1].index("--mmproj") + 1], str(b))
+                    self.assertFalse(processes[0].alive)
+
+                    own.generate(dict(enabled), *params)
+                    self.assertEqual(len(launches), 2)
+
+                    own.generate(dict(enabled, load_mmproj=False), *params)
+                    self.assertEqual(len(launches), 3)
+                    self.assertNotIn("--mmproj", launches[2])
+                    self.assertFalse(processes[1].alive)
+            finally:
+                own.release()
 
 
 class LoadReadySummaryTests(unittest.TestCase):

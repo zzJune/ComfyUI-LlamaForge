@@ -76,7 +76,7 @@ def _gpu_summary(logs, config):
 def _vision_summary(logs, config):
     matches = list(_LOADED_MMPROJ.finditer(logs))
     mmproj_loaded = _base_name(matches[-1].group(1)) if matches else None
-    configured = config.get("mmproj_path")
+    configured = config.get("mmproj_path") if config.get("load_mmproj", True) else None
     requested = _base_name(configured) if configured else None
 
     has_vision = bool(_HAS_VISION.search(logs)) and not bool(_EXPLICIT_NO_VISION.search(logs))
