@@ -33,6 +33,7 @@ class LlamaForgeLoader:
                 "startup_timeout": ("INT", {"default": 300, "min": 15, "max": 1800}),
             },
             "optional": {
+                "gpu_layers_mode": (["manual", "auto"], {"default": "manual"}),
                 "mmproj": ([NO_PROJECTOR, *available_projectors()],),
             },
         }
@@ -44,7 +45,9 @@ class LlamaForgeLoader:
 
     def configure(self, engine, model, memory_mode, context_size, gpu_layers,
                   threads, batch_size, ubatch_size, kv_cache, startup_timeout,
-                  mmproj=NO_PROJECTOR):
+                  mmproj=NO_PROJECTOR, gpu_layers_mode="manual"):
+        if gpu_layers_mode not in ("manual", "auto"):
+            raise ValueError("LlamaForge: gpu_layers_mode must be manual or auto.")
         if ubatch_size > batch_size:
             raise ValueError("LlamaForge: ubatch_size must be no larger than batch_size.")
         config = {
@@ -55,6 +58,7 @@ class LlamaForgeLoader:
             "memory_mode": memory_mode,
             "context_size": context_size,
             "gpu_layers": gpu_layers,
+            "gpu_layers_mode": gpu_layers_mode,
             "threads": threads,
             "batch_size": batch_size,
             "ubatch_size": ubatch_size,

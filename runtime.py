@@ -3,6 +3,7 @@
 import atexit
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -125,6 +126,61 @@ def _http_stream_chat(url, payload, timeout):
         progress.finish(tokens=count, predicted_per_second=rate, success=done)
 
 
+def _out_of_memory_hint(logs, config):
+    """Provide actionable GPU/KV memory guidance only for known OOM signatures."""
+    text = logs.casefold()
+    signatures = (
+        "erroroutofdevicememory",
+        "outofdevicememory",
+        "out of device memory",
+        "cuda error: out of memory",
+        "cuda_error_out_of_memory",
+        "cudaerrormemoryallocation",
+        "cudamalloc failed",
+        "cudamallocasync failed",
+        "hiperroroutofmemory",
+        "failed to allocate buffer for kv cache",
+        "failed to allocate buffer for rs cache",
+        "unable to allocate vulkan",
+        "failed to allocate vulkan",
+    )
+    if not (any(marker in text for marker in signatures)
+            or re.search(r"failed to allocate (?:[^\n]*?)buffer[^\n]*(?:vulkan|cuda)", text)):
+        return ""
+
+    if "vulkan" in text or "vk::device::allocatememory" in text:
+        backend = "Vulkan"
+    elif "cuda" in text:
+        backend = "CUDA"
+    else:
+        backend = "GPU / KV Cache"
+
+    mode = config.get("gpu_layers_mode", "manual")
+    if mode == "auto":
+        layers_hint = (
+            "Auto 已开启；如果仍失败，可进一步减小 context_size，"
+            "或切换为 manual 并降低 gpu_layers（如 8、4、0）。"
+        )
+    else:
+        layers_hint = (
+            "设置 gpu_layers_mode=auto，让兼容的 llama.cpp 自动选择 GPU 层数；"
+            "或者保持 manual，降低 gpu_layers（如 8、4、0）。"
+        )
+    return (
+        "\n\n[LlamaForge 显存不足] 检测到 " + backend + " 显存或 KV Cache 分配失败。"
+        + "\n当前配置：gpu_layers_mode=" + str(mode)
+        + ", gpu_layers=" + str(config.get("gpu_layers"))
+        + ", context_size=" + str(config.get("context_size"))
+        + ", kv_cache=" + str(config.get("kv_cache")) + "。\n"
+        + "建议：1. " + layers_hint + "\n"
+        + "2. 降低 context_size（例如 2048 或 1024），将 kv_cache 设为 q8_0 或 q4_0。\n"
+        + "3. 尝试 batch_size=256、ubatch_size=128 和 memory_mode=low_vram，"
+        + "关闭其他占用显存的程序；NVIDIA 显卡可优先尝试 CUDA 引擎而非 Vulkan。\n"
+        + "4. 大模型即使启用 Auto 也不保证装入显存，可改用更低量化 GGUF 或 CPU 推理。\n"
+        + "以下保留原始 llama-server 日志："
+    )
+
+
 class LocalLlamaServer:
     def __init__(self):
         self._lock = threading.RLock()
@@ -194,22 +250,43 @@ class LocalLlamaServer:
 
     @staticmethod
     def _command(config, port, flags, think=True):
+        mode = config.get("gpu_layers_mode", "manual")
+        if mode not in ("manual", "auto"):
+            raise ValueError("LlamaForge: invalid gpu_layers_mode; use manual or auto.")
         required = [
             ("--model", str(config["model_path"])),
             ("--host", "127.0.0.1"),
             ("--port", str(port)),
             ("--ctx-size", str(config["context_size"])),
-            ("--n-gpu-layers", str(config["gpu_layers"])),
             ("--threads", str(config["threads"])),
             ("--batch-size", str(config["batch_size"])),
             ("--ubatch-size", str(config["ubatch_size"])),
         ]
+        if mode == "manual":
+            required.insert(4, ("--n-gpu-layers", str(config["gpu_layers"])))
+        else:
+            # Explicit "auto" avoids a numeric LLAMA_ARG_N_GPU_LAYERS env override.
+            # The selected build must support both automatic layers and --fit.
+            declaration = re.search(
+                r"--n-gpu-layers\b([^\n]*(?:\n\s+[^\n]*){0,3})",
+                flags, re.IGNORECASE,
+            )
+            supports_auto = bool(declaration and
+                                 re.search(r"\bauto\b", declaration.group(1), re.IGNORECASE))
+            if not supports_auto or not re.search(r"--fit(?=\s|$)", flags):
+                raise RuntimeError(
+                    "LlamaForge: selected llama-server does not support GPU Layers Auto "
+                    "(requires --n-gpu-layers auto and --fit). "
+                    "Update llama.cpp or select gpu_layers_mode=manual."
+                )
         for name, _ in required:
             if name not in flags:
                 raise RuntimeError(f"LlamaForge: selected llama.cpp version does not support {name}.")
         cmd = [str(config["engine_path"])]
         for flag, value in required:
             cmd.extend((flag, value))
+        if mode == "auto":
+            cmd.extend(("--n-gpu-layers", "auto", "--fit", "on"))
         kv = config["kv_cache"]
         if kv != "f16":
             for flag in ("--cache-type-k", "--cache-type-v"):
@@ -238,7 +315,8 @@ class LocalLlamaServer:
             str(config["model_path"]),
             config.get("mmproj_path"),
             config["context_size"],
-            config["gpu_layers"],
+            config.get("gpu_layers_mode", "manual"),
+            config["gpu_layers"] if config.get("gpu_layers_mode", "manual") == "manual" else None,
             config["threads"],
             config["batch_size"],
             config["ubatch_size"],
@@ -278,8 +356,9 @@ class LocalLlamaServer:
             raise TimeoutError(f"llama-server was not ready after {config['startup_timeout']} seconds")
         except (OSError, RuntimeError, TimeoutError) as error:
             logs = self._log_tail()
+            hint = _out_of_memory_hint(logs, config)
             self._stop()
-            raise RuntimeError(f"LlamaForge: startup failed: {error}\n{logs}") from error
+            raise RuntimeError(f"LlamaForge: startup failed: {error}{hint}\n{logs}") from error
 
     def generate(self, config, system_prompt, prompt, max_tokens, temperature, top_p, seed, request_timeout, release_after,
                  think=True, min_p=0.05, repeat_penalty=1.0, top_k=40, image=None):
@@ -313,17 +392,20 @@ class LocalLlamaServer:
                     )
                 except urllib.error.HTTPError as error:
                     detail = error.read(1800).decode("utf-8", errors="replace")
-                    hint = (" Check that the selected GGUF is vision-capable and its matching mmproj is configured."
-                            if image is not None else "")
-                    raise RuntimeError(f"LlamaForge: inference HTTP {error.code}: {detail}{hint}") from error
+                    hint = _out_of_memory_hint(detail + "\n" + self._log_tail(), config)
+                    vision_hint = (" Check that the selected GGUF is vision-capable and its matching mmproj is configured."
+                                   if image is not None and not hint else "")
+                    raise RuntimeError(f"LlamaForge: inference HTTP {error.code}: {detail}{hint}{vision_hint}") from error
                 except (urllib.error.URLError, TimeoutError) as error:
                     logs = self._log_tail()
+                    hint = _out_of_memory_hint(logs, config)
                     self._stop()
-                    raise RuntimeError(f"LlamaForge: server disconnected or timed out: {error}\n{logs}") from error
+                    raise RuntimeError(f"LlamaForge: server disconnected or timed out: {error}{hint}\n{logs}") from error
                 except RuntimeError as error:
                     logs = self._log_tail()
+                    hint = _out_of_memory_hint(logs, config)
                     self._stop()
-                    raise RuntimeError(f"LlamaForge: streaming response failed: {error}\n{logs}") from error
+                    raise RuntimeError(f"LlamaForge: streaming response failed: {error}{hint}\n{logs}") from error
                 choices = result.get("choices") or []
                 if not choices or not isinstance(choices[0].get("message"), dict):
                     raise RuntimeError(f"LlamaForge: unexpected llama-server response: {str(result)[:700]}")

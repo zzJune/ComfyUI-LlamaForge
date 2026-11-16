@@ -325,6 +325,230 @@ class RuntimeTests(unittest.TestCase):
         )
 
 
+
+AUTO_FLAGS = FLAGS.replace("--n-gpu-layers", "") + """
+-ngl, --gpu-layers, --n-gpu-layers N  max. number of layers to store in VRAM, either an exact number,
+                                   'auto', or 'all' (default: auto)
+                                   (env: LLAMA_ARG_N_GPU_LAYERS)
+-fit, --fit [on|off]                whether to adjust unset arguments to fit in device memory
+"""
+
+
+class GpuMemoryTests(unittest.TestCase):
+    def test_loader_auto_manual_input_and_old_workflow_compatibility(self):
+        inputs = nodes.LlamaForgeLoader.INPUT_TYPES()
+        self.assertEqual(inputs["required"]["gpu_layers"][1]["default"], 40)
+        self.assertEqual(inputs["optional"]["gpu_layers_mode"][0], ["manual", "auto"])
+        self.assertEqual(inputs["optional"]["gpu_layers_mode"][1]["default"], "manual")
+        engine = Path(__file__).resolve()
+        with mock.patch.object(nodes, "resolve_engine", return_value=engine), \
+                mock.patch.object(nodes, "resolve_model", return_value=engine):
+            loader = nodes.LlamaForgeLoader()
+            args = ("any-engine", "model.gguf", "balanced", 2048, 32, 6, 256, 128, "q8_0", 30)
+            legacy = loader.configure(*args)[0]
+            self.assertEqual(legacy["gpu_layers_mode"], "manual")
+            self.assertEqual(legacy["gpu_layers"], 32)
+            automatic = loader.configure(*args, gpu_layers_mode="auto")[0]
+            self.assertEqual(automatic["gpu_layers_mode"], "auto")
+            self.assertEqual(automatic["gpu_layers"], 32)
+            with self.assertRaisesRegex(ValueError, "gpu_layers_mode"):
+                loader.configure(*args, gpu_layers_mode="typo")
+
+    def test_auto_uses_native_fit_and_manual_keeps_numeric_offload(self):
+        cfg = config()
+        cfg["gpu_layers_mode"] = "auto"
+        automatic = runtime.LocalLlamaServer._command(cfg, 8999, AUTO_FLAGS)
+        self.assertEqual(automatic[automatic.index("--n-gpu-layers") + 1], "auto")
+        self.assertEqual(automatic[automatic.index("--fit") + 1], "on")
+        self.assertNotIn("20", automatic)
+
+        cfg["gpu_layers_mode"] = "manual"
+        manual = runtime.LocalLlamaServer._command(cfg, 8999, FLAGS)
+        self.assertEqual(manual[manual.index("--n-gpu-layers") + 1], "20")
+        self.assertNotIn("--fit", manual)
+        cfg.pop("gpu_layers_mode")
+        legacy = runtime.LocalLlamaServer._command(cfg, 8999, FLAGS)
+        self.assertEqual(legacy[legacy.index("--n-gpu-layers") + 1], "20")
+
+    def test_auto_does_not_silently_use_unsupported_engine(self):
+        cfg = config()
+        cfg["gpu_layers_mode"] = "auto"
+        for flags in (
+            FLAGS,
+            AUTO_FLAGS.replace("-fit, --fit [on|off]", "--fit-target").replace(
+                "whether to adjust unset arguments to fit in device memory", ""),
+            FLAGS + "\n--fit [on|off] whether to fit\n",
+        ):
+            with self.subTest(flags=flags[-80:]):
+                with self.assertRaisesRegex(RuntimeError, "does not support GPU Layers Auto"):
+                    runtime.LocalLlamaServer._command(cfg, 8999, flags)
+        cfg["gpu_layers_mode"] = "invalid"
+        with self.assertRaisesRegex(ValueError, "gpu_layers_mode"):
+            runtime.LocalLlamaServer._command(cfg, 8999, AUTO_FLAGS)
+
+    def test_auto_reuses_process_when_manual_slider_changes(self):
+        own = runtime.LocalLlamaServer()
+        processes = []
+        commands = []
+
+        def popen(command, **kwargs):
+            commands.append(command)
+            process = FakeProcess()
+            processes.append(process)
+            return process
+
+        def http(url, payload=None, timeout=5):
+            if url.endswith("/health"):
+                return {"status": "ok"}
+            return {"choices": [{"message": {"content": "成功"}, "finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 1}}
+
+        try:
+            with mock.patch.object(own, "_supported_flags", return_value=AUTO_FLAGS), \
+                    mock.patch.object(runtime, "_find_free_port", return_value=19203), \
+                    mock.patch.object(runtime, "_http_json", side_effect=http), \
+                    mock.patch.object(runtime, "_free_comfy_vram"), \
+                    mock.patch.object(runtime.subprocess, "Popen", side_effect=popen):
+                cfg = config()
+                cfg["gpu_layers_mode"] = "auto"
+                params = ("", "你好", 12, 0.5, 0.9, -1, 10, False)
+                own.generate(cfg, *params)
+                another = dict(cfg, gpu_layers=5)
+                own.generate(another, *params)
+                self.assertEqual(len(processes), 1)
+                self.assertTrue(processes[0].alive)
+                manual = dict(another, gpu_layers_mode="manual")
+                own.generate(manual, *params)
+                self.assertEqual(len(processes), 2)
+                self.assertFalse(processes[0].alive)
+                self.assertEqual(commands[0][commands[0].index("--n-gpu-layers") + 1], "auto")
+                self.assertEqual(commands[1][commands[1].index("--n-gpu-layers") + 1], "5")
+        finally:
+            own.release()
+
+    def test_oom_classification_is_targeted_and_actionable(self):
+        cfg = config()
+        vulkan = (
+            "failed to fit params to free device memory: n_gpu_layers already set by user to 32\n"
+            "ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory\n"
+            "failed to allocate buffer for kv cache"
+        )
+        hint = runtime._out_of_memory_hint(vulkan, cfg)
+        self.assertIn("显存不足", hint)
+        self.assertIn("Vulkan", hint)
+        self.assertIn("gpu_layers_mode=auto", hint)
+        self.assertIn("context_size=4096", hint)
+        self.assertIn("q8_0", hint)
+        self.assertIn("low_vram", hint)
+        self.assertIn("CUDA", hint)
+        self.assertIn("2048", hint)
+        self.assertIn("128", hint)
+
+        cfg["gpu_layers_mode"] = "auto"
+        cuda = runtime._out_of_memory_hint("CUDA error: out of memory; cudaMalloc failed", cfg)
+        self.assertIn("CUDA", cuda)
+        self.assertIn("Auto 已开启", cuda)
+        self.assertNotIn("设置 gpu_layers_mode=auto", cuda)
+        kv = runtime._out_of_memory_hint("failed to allocate buffer for kv cache", cfg)
+        self.assertIn("KV Cache", kv)
+        self.assertEqual(runtime._out_of_memory_hint(
+            "server started, loading model; invalid tensor shape", cfg), "")
+
+    def test_crashed_server_reports_oom_without_hiding_original_log(self):
+        own = runtime.LocalLlamaServer()
+        logs = (
+            "ggml_vulkan: Device memory allocation of size 268435456 failed.\n"
+            "ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory\n"
+            "failed to allocate buffer for kv cache\n"
+        )
+
+        def crash(command, **kwargs):
+            kwargs["stdout"].write(logs.encode("utf-8"))
+            kwargs["stdout"].flush()
+            process = FakeProcess()
+            process.alive = False
+            process.returncode = 1
+            return process
+
+        try:
+            with mock.patch.object(own, "_supported_flags", return_value=FLAGS), \
+                    mock.patch.object(runtime, "_find_free_port", return_value=19203), \
+                    mock.patch.object(runtime, "_free_comfy_vram"), \
+                    mock.patch.object(runtime.subprocess, "Popen", side_effect=crash):
+                with self.assertRaises(RuntimeError) as raised:
+                    own._ensure_running(config())
+            message = str(raised.exception)
+            self.assertIn("startup failed", message)
+            self.assertIn("显存不足", message)
+            self.assertIn("Vulkan", message)
+            self.assertIn("ErrorOutOfDeviceMemory", message)
+            self.assertIn("kv cache", message)
+            self.assertIsNone(own._process)
+        finally:
+            own.release()
+
+    def test_other_startup_failure_keeps_original_message(self):
+        own = runtime.LocalLlamaServer()
+
+        def crash(command, **kwargs):
+            kwargs["stdout"].write(b"failed to open GGUF file: not found\n")
+            kwargs["stdout"].flush()
+            process = FakeProcess()
+            process.alive = False
+            process.returncode = 1
+            return process
+
+        try:
+            with mock.patch.object(own, "_supported_flags", return_value=FLAGS), \
+                    mock.patch.object(runtime, "_find_free_port", return_value=19203), \
+                    mock.patch.object(runtime, "_free_comfy_vram"), \
+                    mock.patch.object(runtime.subprocess, "Popen", side_effect=crash):
+                with self.assertRaises(RuntimeError) as raised:
+                    own._ensure_running(config())
+            self.assertIn("GGUF file: not found", str(raised.exception))
+            self.assertNotIn("显存不足", str(raised.exception))
+        finally:
+            own.release()
+
+
+    def test_http_500_oom_exposes_guidance_from_response(self):
+        from io import BytesIO
+        own = runtime.LocalLlamaServer()
+        err = urllib.error.HTTPError(
+            "http://127.0.0.1:1234/v1/chat/completions", 500, "failure", {},
+            BytesIO(b"CUDA error: out of memory; cudaMalloc failed"),
+        )
+        cfg = config()
+        cfg["gpu_layers_mode"] = "auto"
+        with mock.patch.object(own, "_ensure_running"), \
+                mock.patch.object(own, "_log_tail", return_value=""), \
+                mock.patch.object(runtime, "_http_json", side_effect=err):
+            own._port = 1234
+            with self.assertRaises(RuntimeError) as raised:
+                own.generate(cfg, "", "你好", 32, 0.5, 0.9, -1, 10, False)
+        text = str(raised.exception)
+        self.assertIn("inference HTTP 500", text)
+        self.assertIn("CUDA", text)
+        self.assertIn("显存不足", text)
+        self.assertIn("Auto 已开启", text)
+
+    def test_disconnected_oom_keeps_log_and_stops_server(self):
+        own = runtime.LocalLlamaServer()
+        cfg = config()
+        with mock.patch.object(own, "_ensure_running"), \
+                mock.patch.object(own, "_log_tail", return_value="CUDA error: out of memory"), \
+                mock.patch.object(own, "_stop") as stop, \
+                mock.patch.object(runtime, "_http_json", side_effect=urllib.error.URLError("connection closed")):
+            own._port = 1234
+            with self.assertRaises(RuntimeError) as raised:
+                own.generate(cfg, "", "你好", 32, 0.5, 0.9, -1, 10, False)
+        text = str(raised.exception)
+        self.assertIn("server disconnected or timed out", text)
+        self.assertIn("显存不足", text)
+        self.assertIn("CUDA error: out of memory", text)
+        stop.assert_called_once()
+
+
 class HttpRoundTripTests(unittest.TestCase):
     def test_real_local_http_transport_and_loading_health(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

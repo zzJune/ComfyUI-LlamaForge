@@ -118,7 +118,8 @@ ComfyUI/models/llamaforge/
 | `mmproj` | `(auto / embedded)` | 可选独立视觉投影器 |
 | `memory_mode` | `balanced` | 显存管理策略 |
 | `context_size` | `8192` | 上下文窗口，越大越可能占用更多 KV 缓存 |
-| `gpu_layers` | `40` | GPU 卸载层数；`0` 为 CPU 推理 |
+| `gpu_layers` | `40` | Manual 模式下的 GPU 卸载层数；`0` 为 CPU 推理 |
+| `gpu_layers_mode` | `manual` | 可选：`manual` 使用固定 GPU 层数，`auto` 启用 llama.cpp 自动显存适配 |
 | `threads` | `6` | CPU 线程数 |
 | `batch_size` | `2048` | 逻辑批处理大小 |
 | `ubatch_size` | `256` | 物理微批处理大小，不能大于 `batch_size` |
@@ -126,6 +127,13 @@ ComfyUI/models/llamaforge/
 | `startup_timeout` | `300` 秒 | 模型服务启动等待时间 |
 
 `mmproj` 默认的 `(auto / embedded)` 只是**不显式传入** `--mmproj`。如果模型需要独立投影器，应明确选择与该 GGUF 配套的 mmproj；插件不会替你下载或匹配模型文件。
+
+### GPU Layers：Auto 与 Manual
+
+- **Auto（`gpu_layers_mode=auto`）**：启动 llama-server 时传入 `--n-gpu-layers auto --fit on`，由支持此功能的 llama.cpp 构建根据实际空闲显存自动选取 GPU 层数。此模式**忽略 `gpu_layers` 的数字**；切换模式会重新加载模型。需要引擎的 `--help` 同时支持 `--n-gpu-layers auto` 与 `--fit`。
+- **Manual（`gpu_layers_mode=manual`）**：按原有逻辑传入固定的 `--n-gpu-layers <数值>`；`gpu_layers=0` 为 CPU-only。默认为 Manual，以保证此前工作流中的固定数值不被静默改变。
+
+如果在 Auto 模式下仅调整 `gpu_layers` 数字，运行中的模型不需要重新加载，因为这个数字不会用于启动命令。**Auto 不能保证一定加载成功**：例如模型本身过大、上下文固定得过高或其他进程占满显存时，仍可能 OOM。没有对应选项的旧版 llama.cpp 将明确报不支持 Auto，可改用 Manual 或升级引擎。
 
 ### 2. LlamaForge · Generate（文本/视觉推理）
 
@@ -254,7 +262,7 @@ ComfyUI/models/llamaforge/
 
 **启动时提示不支持参数？** 检查引擎版本的 `llama-server --help`。当前插件要求支持 `--model`、`--host`、`--port`、`--ctx-size`、`--n-gpu-layers`、`--threads`、`--batch-size`、`--ubatch-size`、`--reasoning`；外置投影器还需 `--mmproj`。
 
-**CUDA 显存不足、模型启动超时？** 降低 `gpu_layers` 或 `context_size`，尝试 KV 缓存 `q8_0`，使用较小的量化模型，或选择 `balanced` / `low_vram`。`startup_timeout` 控制加载等待，`request_timeout` 控制推理请求超时。
+**CUDA/Vulkan 显存不足或 KV Cache 分配失败？** 插件会检测常见 OOM 日志，并在原始 llama-server 日志之前显示中文排查建议、当前 `gpu_layers_mode`、`gpu_layers`、`context_size` 和 `kv_cache`。优先尝试 `gpu_layers_mode=auto`；如果 Auto 仍失败，可以选 Manual 并降低 `gpu_layers`（例如 8、4 或 0）、减少 `context_size`（例如 2048 或 1024）、把 KV 缓存改为 `q8_0` 或 `q4_0`、减小 `batch_size` / `ubatch_size`，并尝试 `low_vram` 模式。NVIDIA 显卡通常建议优先选 CUDA 引擎而非 Vulkan 引擎。更低量化的模型也能减轻内存压力。提示**不会自动修改参数或重试**。`startup_timeout` 控制加载等待，`request_timeout` 控制推理请求超时。
 
 **图片无法识别？** 检查 GGUF 是否支持图像、`mmproj` 是否匹配，以及 llama.cpp 引擎是否支持多模态。建议先使用一张较小图片验证。
 

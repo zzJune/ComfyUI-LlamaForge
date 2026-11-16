@@ -1,4 +1,4 @@
-# ComfyUI-LlamaForge (v0.1)
+# ComfyUI-LlamaForge (v0.2)
 
 [English](README.md) | [简体中文](README_CN.md)
 
@@ -21,10 +21,19 @@ Do not put large models under custom_nodes or inside the engines directory. The 
 
 ## Nodes
 
-- **Model & Engine:** Chooses a discovered build, one local GGUF, optional matching `mmproj` vision projector, memory mode, context, GPU layers, CPU threads, batches and KV cache format. It only returns configuration and does not load weights until needed.
+- **Model & Engine:** Chooses a discovered build, one local GGUF, optional matching `mmproj` vision projector, memory mode, **GPU Layers Auto/Manual**, context, CPU threads, batches and KV cache format. It only returns configuration and does not load weights until needed.
 - **Generate:** An output node that starts/reuses the owned llama-server, sends an SSE-streamed text or image+text chat request, and emits text, JSON statistics, and an optional `reasoning` string. Its optional `image` socket accepts ComfyUI `IMAGE` tensors for visual understanding. Its results are recorded in ComfyUI execution history. The optional `think` boolean defaults to `true` for existing workflows. Set `think=false` to request non-thinking generation on models that support switching reasoning mode. Switching `think` restarts the owned llama-server and reloads the GGUF model; subsequent runs with the same mode reuse it. Runs on every queue execution rather than relying on ComfyUI's output cache. `release_after` allows VRAM to be reclaimed before subsequent image/video processing.
 - **Release VRAM:** An output node that terminates only the process created by this extension. Connect its optional after_text input to generation output to force graph execution order. Its status is recorded in ComfyUI execution history.
 - **Parse Prompt JSON:** Accepts a JSON string such as `{"rewritten_prompt": "A cinematic landscape", "wh_ratio": "3:2"}`, including JSON wrapped in Markdown code fences or explanatory text, and returns two independent `STRING` sockets: `rewritten_prompt` and `wh_ratio`. Connect the `text` output from **Generate** to its `json_text` input, then use each field in downstream image-generation nodes. Invalid JSON, missing keys and non-string values produce actionable errors. The node does not execute llama.cpp itself.
+
+### GPU Layers: automatic fitting or manual offload
+
+The **Model & Engine** node exposes an optional `gpu_layers_mode` selector (`manual` or `auto`). The default is **`manual`** to preserve existing workflows and their numerical `gpu_layers` setting (default `40`, `0` = CPU-only).
+
+- **`auto`:** starts a compatible llama-server with `--n-gpu-layers auto --fit on`, allowing llama.cpp to choose an offload layer count based on available device memory. The numeric `gpu_layers` field is ignored in this mode. Requires a llama.cpp build advertising both `--n-gpu-layers auto` and `--fit`; unsupported versions show an explicit error rather than silently falling back.
+- **`manual`:** continues to pass `--n-gpu-layers <gpu_layers>` exactly as before. This can prevent llama.cpp from reducing the GPU layer count when memory is insufficient. Models may still need smaller `context_size`/KV caches.
+
+Switching mode restarts the plugin-owned model server, but changing the unused numerical `gpu_layers` field while Auto is active does not reload the model. Auto is **not a guarantee against OOM**: an oversized model, a large fixed context, other GPU applications or Vulkan/CUDA memory fragmentation may still prevent startup. Existing configs and API workflows lacking `gpu_layers_mode` continue to use `manual`.
 
 The **Generate** node exposes `top_p` (default `0.95`, `1.0` disables nucleus sampling) plus optional `top_k` (default `40`, `0` disables Top-K sampling), `min_p` (default `0.05`, `0.0` disables minimum-probability filtering) and `repeat_penalty` (default `1.0`, no repetition penalty; values above `1.0` discourage repeated tokens). `top_k` accepts integers from `0` to `2048`. These sampling parameters are sent per request as `top_p`, `top_k`, `min_p`, and `repeat_penalty` to the llama.cpp chat-completions API; changing them does not require reloading the model. The optional fields preserve compatibility with older workflows.
 
@@ -56,17 +65,18 @@ The counter includes both reasoning and answer tokens (not input/prompt tokens).
 - balanced (default): unloads ComfyUI-managed models before the initial llama-server load and keeps the LLM available for reuse.
 - low_vram: unloads ComfyUI-managed models before starting and shuts down llama-server after **every** generation.
 
-All modes respect your gpu_layers value. For CPU-only mode set gpu_layers=0. These are lifecycle policies, **not** automatic GPU-layer fitting. ComfyUI's own model loads and the external llama.cpp process do not share a unified memory allocator; for image/video workflows use low_vram or release_after=true.
+For CPU-only mode choose `gpu_layers_mode=manual` with `gpu_layers=0`. The separate `gpu_layers_mode=auto` setting enables llama.cpp's built-in GPU-layer auto fitting. Memory modes remain lifecycle policies, and automatic fitting still depends on free memory and the selected backend. ComfyUI's own model loads and the external llama.cpp process do not share a unified memory allocator; for image/video workflows use low_vram or release_after=true.
 
 ## Failure behavior
 
 - Explicit errors for missing versions/models, unsupported flags, server startup failure, model-load timeout, or invalid API responses.
+- **OOM diagnostics:** known Vulkan, CUDA and KV Cache allocation errors are detected in the llama-server log. LlamaForge displays the selected GPU mode, numeric layers, context size, KV precision and Chinese troubleshooting advice (Auto/Manual, fewer layers, smaller context, q8_0/q4_0 KV, smaller batch, low_vram, CUDA on NVIDIA), followed by the **original** server log. It never silently retries with changed settings.
 - Logging is captured from this extension's child process and appended to startup/crash errors.
 - If generation fails or times out after being sent to the server, LlamaForge does **not** retry it automatically (to avoid duplicate work).
 - Requests are serialized within a single ComfyUI Python process, preventing version switches from interrupting concurrent LLM requests.
 - Old owned processes are terminated before switching models or engine builds, and on ComfyUI interpreter shutdown when possible.
 
-## Limits in v0.1
+## Limits in v0.2
 
 Local text chat and image understanding (VLM) with one to four images. Streaming is used internally for token progress, but token-by-token output is not yet exposed as a separate ComfyUI socket. No video/audio model input, automatic version download, UI-based installation, MTP tuning, inference benchmarking or router mode yet. All llama.cpp runtimes must be configured locally.
 
