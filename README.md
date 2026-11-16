@@ -1,5 +1,7 @@
 # ComfyUI-LlamaForge (v0.1)
 
+[English](README.md) | [简体中文](README_CN.md)
+
 Local GGUF text and vision-language-model (VLM) inference for ComfyUI. Runs a user-supplied llama.cpp **llama-server** executable as a separate local process. No llama-cpp-python, automatic downloads, remote APIs, or ComfyUI core changes.
 
 ## Setup (Windows)
