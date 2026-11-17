@@ -16,8 +16,25 @@ from .live_progress import LiveRun, GenerationCancelled
 from .structured_output import PROMPT_REWRITE_SCHEMA_JSON
 import json
 from .gguf_metadata import format_model_info, inspect_gguf
-from .mmproj_matcher import MM_PROJ_MODES, analyze_projectors, format_match
+from .mmproj_matcher import MM_PROJ_MODES, MAX_CANDIDATES, analyze_projectors, format_match
 from .environment_diagnostics import check_environment, format_environment_report
+
+GENERATION_MODES = ("On Change", "Always")
+
+
+def _asset_stamp(alias, path):
+    """Cheap, read-only fingerprint; never load model or projector tensors."""
+    stat = path.stat()
+    return (alias, str(path), stat.st_size, stat.st_mtime_ns,
+            stat.st_ino, stat.st_dev)
+
+
+def _resolved_stamp(alias, resolver):
+    try:
+        return _asset_stamp(alias, resolver(alias))
+    except (OSError, ValueError) as exc:
+        return ("unavailable", alias, type(exc).__name__)
+
 
 
 class LlamaForgeLoader:
@@ -60,6 +77,37 @@ class LlamaForgeLoader:
     RETURN_NAMES = ("config",)
     FUNCTION = "configure"
     CATEGORY = "LlamaForge"
+
+    @classmethod
+    def IS_CHANGED(cls, engine, model, load_mmproj=True, mmproj=NO_PROJECTOR,
+                   mmproj_mode="Legacy", **kwargs):
+        """Invalidate downstream cached text when the selected files change.
+
+        A ComfyUI input signature alone sees only registry aliases; the actual
+        GGUF or llama-server binary may be replaced without renaming its alias.
+        This probes file stats only, never GPU memory or GGUF weights.
+        """
+        assets = [
+            _resolved_stamp(engine, resolve_engine),
+            _resolved_stamp(model, resolve_model),
+        ]
+        if mmproj_mode == "Auto":
+            try:
+                aliases = available_projectors()
+            except (OSError, ValueError) as exc:
+                assets.append(("projector_discovery_unavailable", type(exc).__name__))
+            else:
+                # Track additions/removals even if the registry exceeds the
+                # matchers safe scan limit. Do not stat unbounded file lists.
+                assets.append(("projector_aliases", tuple(aliases)))
+                if len(aliases) <= MAX_CANDIDATES:
+                    assets.extend(_resolved_stamp(alias, resolve_projector)
+                                  for alias in aliases)
+        elif (mmproj_mode == "Enabled" or
+              (mmproj_mode == "Legacy" and load_mmproj)):
+            if mmproj != NO_PROJECTOR:
+                assets.append(_resolved_stamp(mmproj, resolve_projector))
+        return tuple(assets)
 
     def configure(self, engine, model, memory_mode="balanced", context_size=8192,
                   gpu_layers=40, threads=6, batch_size=2048, ubatch_size=256,
@@ -275,6 +323,9 @@ class LlamaForgeGenerate:
                 "json_schema": ("STRING", {"default": PROMPT_REWRITE_SCHEMA_JSON, "multiline": True}),
                 "cache_mode": (["Auto", "Enabled", "Disabled"], {"default": "Auto"}),
                 "vram_snapshot": ("BOOLEAN", {"default": False}),
+                # Append-only. New UI nodes start On Change; old API calls
+                # without this input retain Always via the function default.
+                "generation_mode": (list(GENERATION_MODES), {"default": "On Change"}),
             },
         }
 
@@ -285,15 +336,24 @@ class LlamaForgeGenerate:
     OUTPUT_NODE = True
 
     @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        # Never let ComfyUI reuse generated text from a previous queue execution.
-        return float("nan")
+    def IS_CHANGED(cls, generation_mode="Always", **kwargs):
+        # NaN forces execution; a stable signature enables native ComfyUI
+        # output caching across queued prompts when all inputs are unchanged.
+        if generation_mode == "Always":
+            return float("nan")
+        if generation_mode == "On Change":
+            return False
+        raise ValueError("LlamaForge: generation_mode must be On Change or Always.")
 
     def generate(self, config, prompt, system_prompt, max_tokens=512, temperature=0.7,
                  top_p=0.95, seed=-1, request_timeout=600, release_after=False,
                  think=True, min_p=0.05, repeat_penalty=1.0, top_k=40,
                  image=None, output_format="Text", json_schema=PROMPT_REWRITE_SCHEMA_JSON,
-                 cache_mode="Auto", vram_snapshot=False):
+                 cache_mode="Auto", vram_snapshot=False, generation_mode="Always"):
+        if generation_mode not in GENERATION_MODES:
+            raise ValueError("LlamaForge: generation_mode must be On Change or Always.")
+        # The mode changes ComfyUI scheduling only; it is not a llama-server
+        # request option, so leave existing inference payloads untouched.
         # Keep existing Text-mode dispatch signature and stored widget values.
         # Structured mode adds only explicitly selected optional arguments.
         structured = ({"output_format": output_format, "json_schema": json_schema}

@@ -48,6 +48,8 @@
 
 在 **Model & Engine** 选择 `engine` 和 `model`，到 **Generate** 填写 `prompt`，点击 **Queue Prompt（运行队列）**。
 
+**重新生成控制：** 新建 Generate 节点的 `generation_mode` 默认为 `On Change`，提示词、参数及上游配置都没变时，直接复用 ComfyUI 原生内存缓存中的上次成功结果（`text`、`stats_json`、`reasoning`），不会再次调用 llama-server。改为 `Always` 则每次排队均重新推理。**升级前保存的旧工作流继续保持 `Always`**，需要时可手动改为 `On Change`。失败或取消的任务不会缓存；所选 GGUF、mmproj 或引擎文件变化且文件元数据改变时，缓存会失效。重启 ComfyUI 或缓存被回收后，也可能重新生成。
+
 **实时进度与取消：** 运行时，**Generate** 节点底部展示模型加载、近似 Token 数、生成速度、耗时和到最大 Token 上限的估计时间。点击节点中的 **取消生成**（或右键选择「LlamaForge · 取消当前生成」）可停止当前请求；插件只会终止自己管理的推理进程，不会调用 ComfyUI 全局取消。取消后可以重新运行。刷新页面后不会恢复之前的实时进度；最终 Token 数以服务端返回的数据为准。
 
 **图片理解**
@@ -116,12 +118,15 @@
 | `json_schema` | 内置提示词模板 | 仅 `JSON Schema` 模式使用，可编辑或连接 STRING |
 | `cache_mode` | `Auto` | `Auto` / `Enabled` / `Disabled`，控制提示词前缀缓存 |
 | `vram_snapshot` | `false` | 可选获取 NVIDIA 驱动显存快照，仅供参考，不等于 llama-server 进程显存 |
+| `generation_mode` | `On Change`（新节点） | `On Change` 输入不变时复用 ComfyUI 的成功输出；`Always` 每次 Queue 都重新生成，旧工作流保留 `Always` |
 
 `json_schema` 支持常见 JSON Schema 字段，但不支持 `$ref`、`oneOf`、`anyOf` 等复杂结构。使用结构化输出时，请选择兼容的 llama.cpp 构建，并为 `max_tokens` 留足空间。 `pattern` 仅支持安全的简单正则格式（例如 `^[0-9]+:[0-9]+$`），拒绝可能导致大量回溯的写法；JSON 数值不接受 NaN、Infinity。
 
 **Context 与思考预算：** `context_size` 由系统提示词、用户输入、图片 Token（如有）和模型生成内容（包括思考 Token）共同占用。`max_tokens` 设为与 `context_size` 相同，**不代表**还能完整输出这么多 Token。若服务端返回 `finish_reason=length` 且 JSON 不完整，应同时检查上下文与输出上限；仅调大 `max_tokens` 不一定有效。对于简短 JSON，可在模型支持时尝试 `think=false`、适当缩小输出上限，并为输入留出上下文空间。`length` 结束原因本身无法区分输出上限与上下文耗尽。
 
 **提示词缓存：** 多次使用同一个模型与 system prompt 时，可选 `Enabled` 复用相同前缀；`Auto` 按引擎能力处理，`Disabled` 发送 `cache_prompt=false`。`stats_json.prompt_cache` 会显示服务端实际返回的缓存 Token、待处理 Token 和命中率，缺失时标为「未确认」。图片输入不复用缓存，释放服务后缓存失效，不额外启用 RAM 缓存。
+
+**两种缓存的区别：** `generation_mode=On Change` 是 **ComfyUI 节点输出缓存**，命中后直接跳过整次推理；`cache_mode` 是 **llama.cpp 提示词前缀缓存**，只有真正运行推理时才会发挥作用。本插件没有增加磁盘持久化的生成结果缓存。
 
 **推理性能统计：** `Generate.stats_json.performance` 包含提示词/生成 Token、Prefill 耗时与速度、生成耗时与速度、单次请求耗时、冷启动耗时、GPU 实际卸载层数和 KV 配置；每项标明 `source`（服务端 / 客户端计时 / 配置 / 未确认）。控制台同步显示摘要。冷启动时间为进程启动到服务就绪，不等于单纯权重加载耗时；热复用不会显示虚假的加载耗时。开启 `vram_snapshot` 时显示驱动全局显存信息，而非本插件进程独占显存。
 

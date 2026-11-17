@@ -69,7 +69,7 @@ class InputTests(unittest.TestCase):
             "think", "max_tokens", "temperature", "top_k", "top_p",
             "min_p", "repeat_penalty", "seed", "request_timeout",
             "release_after", "image", "output_format", "json_schema",
-            "cache_mode", "vram_snapshot",
+            "cache_mode", "vram_snapshot", "generation_mode",
         ])
         self.assertEqual(spec["optional"]["output_format"][0], ["Text", "JSON", "JSON Schema"])
         self.assertEqual(spec["optional"]["output_format"][1]["default"], "Text")

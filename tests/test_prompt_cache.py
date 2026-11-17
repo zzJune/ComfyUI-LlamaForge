@@ -128,7 +128,8 @@ class CacheNodeTests(unittest.TestCase):
     def test_new_control_is_last_optional_and_defaults_to_auto(self):
         schema = nodes.LlamaForgeGenerate.INPUT_TYPES()
         optional = list(schema["optional"])
-        self.assertEqual(optional[-4:], ["output_format", "json_schema", "cache_mode", "vram_snapshot"])
+        self.assertEqual(optional[-5:], ["output_format", "json_schema", "cache_mode",
+                                          "vram_snapshot", "generation_mode"])
         self.assertEqual(schema["optional"]["cache_mode"][0], ["Auto", "Enabled", "Disabled"])
         self.assertEqual(schema["optional"]["cache_mode"][1]["default"], "Auto")
         self.assertEqual(nodes.LlamaForgeGenerate.RETURN_NAMES, ("text", "stats_json", "reasoning"))

@@ -48,6 +48,8 @@ Model & Engine [config] → Generate [config]
 
 Select `engine` and `model` in **Model & Engine**, enter `prompt` in **Generate**, then click **Queue Prompt**.
 
+**Generate execution mode:** Set `generation_mode` to `On Change` (the default for newly created nodes) to reuse the previous successful `text`, `stats_json`, and `reasoning` from ComfyUI’s native in-memory node cache whenever all inputs and upstream settings remain unchanged. Choose `Always` to regenerate on every queue, even with identical inputs. Workflows saved before this control was added retain the previous **Always** behavior when loaded; you can switch them to `On Change` manually. Failed or cancelled generations are not cached. Replacing the selected GGUF, mmproj, or llama-server file invalidates the cache when its file metadata changes. Cache entries can be evicted or cleared on restart.
+
 **Live progress and cancel:** During generation, **Generate** shows model loading, approximate streamed token count, speed, elapsed time, and time estimated *to the output-token cap*. Click **取消生成** inside the node or right-click it and choose **LlamaForge · 取消当前生成** to stop only this request. The plugin stops its owned llama-server process if necessary; it does not globally interrupt other ComfyUI jobs. You can run again afterward. Live status is not restored across page reloads; final token totals use server-reported data when available.
 
 **Image understanding**
@@ -116,12 +118,15 @@ Memory modes: `performance` keeps ComfyUI models resident; `balanced` unloads Co
 | `json_schema` | Prompt rewrite schema | JSON Schema used only in `JSON Schema` mode |
 | `cache_mode` | `Auto` | `Auto`, `Enabled`, or `Disabled` for llama.cpp prompt-prefix caching |
 | `vram_snapshot` | `false` | Optional NVIDIA driver-wide VRAM snapshot; not process memory usage |
+| `generation_mode` | `On Change` (new nodes) | `On Change`: reuse successful ComfyUI output when inputs are unchanged; `Always`: run inference every queue. Older workflows retain `Always`. |
 
 The `json_schema` input accepts standard JSON Schema syntax **within the supported subset**; unsupported keywords such as `$ref`, `oneOf`, and `anyOf` are rejected. For structured output, use a compatible llama.cpp build and allocate sufficient `max_tokens`. `pattern` accepts only simple safe expressions (such as `^[0-9]+:[0-9]+$`); potentially expensive backtracking patterns and non-finite JSON numbers are rejected.
 
 **Context and reasoning budget:** `context_size` covers the system/user prompt, image tokens where applicable, and generated tokens (including reasoning). Setting `max_tokens` equal to `context_size` does **not** reserve that many tokens for the answer. If the server stops with `finish_reason=length` before producing valid JSON, check both settings; increasing `max_tokens` alone may not help. For short structured results, try `think=false` (when supported), a smaller output cap, and enough remaining context. The server's `length` finish reason does not by itself distinguish an output cap from context exhaustion.
 
 **Prompt cache:** Keep the same model and system prompt across requests, then select `Enabled` to reuse common prompt prefixes. `Auto` uses supported engine behavior; `Disabled` sends `cache_prompt=false`. The `stats_json.prompt_cache` object reports server-provided cached/new tokens and hit rate when available. Image inputs bypass prefix caching; releasing the server clears its cache. No additional RAM cache is enabled.
+
+**Two different caches:** `generation_mode=On Change` reuses a *complete prior output* via ComfyUI without calling llama-server again. `cache_mode` only controls llama.cpp prompt-prefix reuse **when a generation actually runs**. The plugin adds no separate persistent output cache.
 
 **Inference statistics:** `Generate.stats_json.performance` reports prompt/output tokens, prompt evaluation and generation time/speed, request round-trip, cold server startup, actual GPU offload layers (when logged), and requested KV type. Each metric declares its `source` (server, client clock, configuration, or unknown). A compact summary also appears in the console. Startup time runs from process spawn until the server is ready, not pure tensor-loading time; reused models have no new startup time. `vram_snapshot` optionally records the driver-wide snapshot, never a per-process VRAM measurement.
 

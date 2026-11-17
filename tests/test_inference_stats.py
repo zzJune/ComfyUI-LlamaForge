@@ -243,8 +243,9 @@ class PerformanceDataTests(unittest.TestCase):
 class PerformanceNodeTests(unittest.TestCase):
     def test_append_only_generate_control_and_output_ports(self):
         spec = nodes.LlamaForgeGenerate.INPUT_TYPES()
-        self.assertEqual(list(spec["optional"])[-4:], [
+        self.assertEqual(list(spec["optional"])[-5:], [
             "output_format", "json_schema", "cache_mode", "vram_snapshot",
+            "generation_mode",
         ])
         self.assertEqual(spec["optional"]["vram_snapshot"],
                          ("BOOLEAN", {"default": False}))

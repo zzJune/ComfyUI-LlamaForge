@@ -5,6 +5,7 @@ import { previewLines, ellipsize } from "./gguf_preview.js";
 import { projectorMatchLines } from "./mmproj_match_preview.js";
 import { installPresetMenu } from "./preset_ui.js";
 import { installLiveUI } from "./live_ui.js";
+import { installGenerationModeMigration } from "./generation_mode_migration.js";
 
 // Async metadata preview uses canvas drawing, not a new serialized widget.
 function installGGUFPreview(node) {
@@ -128,5 +129,6 @@ app.registerExtension({
         installGGUFPreview(node);
         installPresetMenu(node);
         installLiveUI(node);
+        installGenerationModeMigration(node);
     },
 });
