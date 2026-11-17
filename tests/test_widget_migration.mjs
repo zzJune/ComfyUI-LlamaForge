@@ -10,7 +10,7 @@ const { migrateModelEngineWidgets, LOADER_WIDGET_ORDER } = await import(
 const expectedOrder = [
     "engine", "model", "load_mmproj", "mmproj", "gpu_layers_mode",
     "gpu_layers", "memory_mode", "context_size", "kv_cache",
-    "threads", "batch_size", "ubatch_size", "startup_timeout",
+    "threads", "batch_size", "ubatch_size", "startup_timeout", "mmproj_mode",
 ];
 
 const original = [

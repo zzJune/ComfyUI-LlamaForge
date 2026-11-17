@@ -66,7 +66,11 @@ class FakeProcess:
 
 class RegistryTests(unittest.TestCase):
     def test_nodes_are_registered(self):
-        self.assertEqual(len(package.NODE_CLASS_MAPPINGS), 4)
+        self.assertEqual(len(package.NODE_CLASS_MAPPINGS), 8)
+        self.assertIn("LlamaForgeProjectorMatcher", package.NODE_CLASS_MAPPINGS)
+        self.assertIn('LlamaForgeCheckEnvironment', package.NODE_CLASS_MAPPINGS)
+        self.assertIn('LlamaForgeMemoryAdvisor', package.NODE_CLASS_MAPPINGS)
+        self.assertIn("LlamaForgeModelInformation", package.NODE_CLASS_MAPPINGS)
         self.assertIn("LlamaForgeGenerate", package.NODE_CLASS_MAPPINGS)
 
     def test_multiversion_discovery_and_resolve(self):
@@ -556,7 +560,7 @@ class ModelEngineMmprojToggleTests(unittest.TestCase):
         "engine", "model", "load_mmproj", "mmproj",
         "gpu_layers_mode", "gpu_layers", "memory_mode",
         "context_size", "kv_cache", "threads",
-        "batch_size", "ubatch_size", "startup_timeout",
+        "batch_size", "ubatch_size", "startup_timeout", "mmproj_mode",
     ]
 
     def test_grouped_loader_widget_schema_and_default(self):
@@ -567,6 +571,7 @@ class ModelEngineMmprojToggleTests(unittest.TestCase):
             self.EXPECTED_WIDGET_ORDER,
         )
         self.assertEqual(settings["optional"]["load_mmproj"], ("BOOLEAN", {"default": True}))
+        self.assertEqual(settings["optional"]["mmproj_mode"][1]["default"], "Legacy")
         self.assertEqual(settings["optional"]["gpu_layers_mode"][1]["default"], "manual")
         self.assertEqual(settings["optional"]["mmproj"][0][0], registry.NO_PROJECTOR)
         self.assertEqual(package.WEB_DIRECTORY, "./web")
@@ -822,8 +827,9 @@ class LoadReadySummaryTests(unittest.TestCase):
                 with mock.patch.object(server, "_command", return_value=["llama-server"]):
                     server.generate(*args)
                     server.generate(*args)
-                    self.assertEqual(len(seen), 1)
-                    lines = seen[0][0].splitlines()
+                    ready = [args[0] for args in seen if args[0].startswith("[LlamaForge] [Model]")]
+                    self.assertEqual(len(ready), 1)
+                    lines = ready[0].splitlines()
                     self.assertEqual(len(lines), 4)
                     self.assertEqual([x.split("]")[1] for x in lines],
                                      [" [Model", " [GPU", " [Vision", " [Ready"])
@@ -835,8 +841,9 @@ class LoadReadySummaryTests(unittest.TestCase):
                                 model_path=r"D:\secret\next-model.gguf")
                     args2 = (cfg2, "", "你好", 30, 0.7, 0.9, -1, 10, False)
                     server.generate(*args2)
-                    self.assertEqual(len(seen), 2)
-                    self.assertIn("next-model.gguf", seen[1][0])
+                    ready = [args[0] for args in seen if args[0].startswith("[LlamaForge] [Model]")]
+                    self.assertEqual(len(ready), 2)
+                    self.assertIn("next-model.gguf", ready[1])
                     self.assertFalse(server_processes[0].alive)
             finally:
                 server.release()
@@ -1035,7 +1042,8 @@ class WorkflowOutputTests(unittest.TestCase):
         self.assertEqual(list(params["optional"]), [
             "think", "max_tokens", "temperature", "top_k", "top_p",
             "min_p", "repeat_penalty", "seed", "request_timeout",
-            "release_after", "image",
+            "release_after", "image", "output_format", "json_schema",
+            "cache_mode", "vram_snapshot",
         ])
         self.assertEqual(params["optional"]["max_tokens"][1]["default"], 512)
         self.assertEqual(params["optional"]["top_p"][1]["default"], 0.95)

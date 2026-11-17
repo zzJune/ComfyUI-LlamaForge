@@ -11,3 +11,6 @@ venv/
 *.gguf
 *.safetensors
 *.ckpt
+
+# Local-only development roadmap; do not commit to a public repository.
+/docs/DEVELOPMENT_ROADMAP_PRIVATE.md

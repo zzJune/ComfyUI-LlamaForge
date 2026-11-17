@@ -1,188 +1,62 @@
-# ComfyUI-LlamaForge 中文使用说明
+# ComfyUI-LlamaForge
 
 [English](README.md) | **简体中文**
 
-ComfyUI-LlamaForge 是一个用于 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) 的本地 GGUF 语言模型扩展，使用 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的 `llama-server` 独立进程来运行文本模型和视觉语言模型（VLM）。
+在 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) 中通过 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的 `llama-server` 运行本地 GGUF 语言模型和视觉语言模型，支持文本与图片理解、结构化 JSON、mmproj 自动匹配、实时进度与取消、配置预设、提示词缓存、推理统计及显存与环境检查。
 
-支持纯文本生成、图片理解、思考内容输出、Token 进度统计、采样参数调整以及按需释放推理进程。插件本身不自动下载模型和推理引擎，也无需 `llama-cpp-python`。
+**所有推理在本地进行**；插件不自动下载模型或推理引擎。
 
-> **说明：** 视觉模型支持的是「输入图片、生成文字解释」，而不是直接生成图片。必须使用真正具备视觉能力的 GGUF 模型，并在需要时选择与之匹配的多模态投影器（`mmproj`）。
+## 安装配置
 
-## 目录
+1. 在 ComfyUI 的 `custom_nodes` 目录执行：
 
-- [安装与配置](#安装与配置)
-- [四个主要节点](#四个主要节点)
-- [快速上手：文本生成](#快速上手文本生成)
-- [快速上手：视觉模型看图问答](#快速上手视觉模型看图问答)
-- [生成进度条与统计](#生成进度条与统计)
-- [内存管理与常见问题](#内存管理与常见问题)
-- [开发测试与已知限制](#开发测试与已知限制)
+   ```bash
+   cd ComfyUI/custom_nodes
+   git clone https://github.com/zzJune/ComfyUI-LlamaForge.git
+   ```
 
-## 安装与配置
+2. 下载适合自己 CPU/GPU 的 llama.cpp 构建，Windows 使用 `llama-server.exe`，并保留配套 DLL。选择一种引擎配置方式：
 
-### 1. 安装到 ComfyUI
+   - 将发行包解压到 `ComfyUI-LlamaForge/engines/<版本>/`（或 `<版本>/bin/`）。
+   - 将 `engines.json.example` 复制为 `engines.json`，填写实际路径：
 
-在 ComfyUI 的 `custom_nodes` 文件夹执行：
+     ```json
+     {
+       "versions": {
+         "cuda": "D:/llama.cpp/cuda/llama-server.exe",
+         "cpu": "D:/llama.cpp/cpu/llama-server.exe"
+       }
+     }
+     ```
 
-```bash
-git clone https://github.com/zzJune/ComfyUI-LlamaForge.git
-```
+   - 也可设置 `LLAMAFORGE_LLAMA_SERVER`（单个引擎）、`LLAMAFORGE_ENGINE_DIRS`（额外引擎目录），或者将 `llama-server` 加入系统 `PATH`。
 
-正确的目录结构为：
+3. 将 GGUF 放到 `ComfyUI/models/LLM/` 或 `ComfyUI/models/llamaforge/`。插件也支持已注册的 ComfyUI `LLM` 路径及 `LLAMAFORGE_MODEL_DIRS` 指定的目录；Windows 多路径使用分号 `;` 分隔。需要独立视觉投影器的模型，还应准备匹配的 `*mmproj*.gguf`。
 
-```text
-ComfyUI/
-└── custom_nodes/
-    └── ComfyUI-LlamaForge/
-        ├── __init__.py
-        ├── nodes.py
-        ├── registry.py
-        ├── runtime.py
-        ├── vision.py
-        ├── engines.json.example
-        ├── README.md
-        └── README_CN.md
-```
+4. **重启 ComfyUI**，搜索 `LlamaForge` 节点，选择引擎和模型。新增模型文件后可刷新页面。
 
-**重启 ComfyUI 进程**，在节点搜索框输入 `LlamaForge`，可以找到四个节点。初次安装或升级 Python 节点后，**仅刷新浏览器不够**。
+## 快速使用
 
-### 2. 准备 llama.cpp
-
-自行下载与电脑系统、CPU/GPU 匹配的 llama.cpp 编译版本。Windows 使用 `llama-server.exe`；注意将发行包中的依赖 DLL 与可执行文件一起保留。
-
-可以通过以下任一方式配置：
-
-**方式一：放到插件目录**
+**文本生成**
 
 ```text
-ComfyUI-LlamaForge/
-└── engines/
-    ├── cuda-version-a/
-    │   ├── llama-server.exe
-    │   └── (配套 DLL)
-    └── cuda-version-b/
-        └── bin/
-            └── llama-server.exe
+[Model & Engine] ── config ──> [Generate]
+                                 ├── text → 文本预览 / 下游节点
+                                 ├── stats_json
+                                 └── reasoning
 ```
 
-**方式二：创建 engines.json**
+在 **Model & Engine** 选择 `engine` 和 `model`，到 **Generate** 填写 `prompt`，点击 **Queue Prompt（运行队列）**。
 
-复制 `engines.json.example` 为 `engines.json`，按实际路径修改，例如：
+**实时进度与取消：** 运行时，**Generate** 节点底部展示模型加载、近似 Token 数、生成速度、耗时和到最大 Token 上限的估计时间。点击节点中的 **取消生成**（或右键选择「LlamaForge · 取消当前生成」）可停止当前请求；插件只会终止自己管理的推理进程，不会调用 ComfyUI 全局取消。取消后可以重新运行。刷新页面后不会恢复之前的实时进度；最终 Token 数以服务端返回的数据为准。
 
-```json
-{
-  "versions": {
-    "cuda-llama": "D:/llama-builds/cuda/llama-server.exe",
-    "cpu-llama": "D:/llama-builds/cpu/llama-server.exe"
-  }
-}
-```
+**图片理解**
 
-**方式三：设置环境变量**
+将 `Load Image.IMAGE` 连接到 `Generate.image`，选择支持视觉的 GGUF。在 **Model & Engine** 设置 `mmproj_mode`：`Legacy`（默认，沿用原 `load_mmproj` + `mmproj`）、`Auto`（根据 GGUF 元数据选择唯一高置信投影器）、`Enabled`（明确选择 `mmproj`）、`Disabled`（不附加外置文件，不影响模型内嵌视觉）。`Auto` 找不到可信候选或有多个候选时不会乱选；图片输入会提示改为手动模式。可通过新增的 **Projector Matcher** 节点查看候选、置信程度和证据。**元数据匹配并不保证实际推理兼容。** 一次最多四张图片；此功能是看图生成文字，不是文生图。
 
-| 环境变量 | 用途 |
-|---|---|
-| `LLAMAFORGE_LLAMA_SERVER` | 指定单个 `llama-server` 可执行文件 |
-| `LLAMAFORGE_ENGINE_DIRS` | 扩展引擎搜索目录 |
-| `LLAMAFORGE_MODEL_DIRS` | 扩展 GGUF 模型搜索目录 |
+**生成结构化提示词**
 
-Windows 的多个路径用分号 `;` 分隔；其他系统使用自身的路径分隔符。`PATH` 中的 `llama-server` 也可以被发现。
-
-注意：目前选择的引擎需要支持插件实际使用的 llama.cpp 参数，包括 `--reasoning on/off`；部分旧版本可能不兼容。
-
-### 3. 准备 GGUF 模型
-
-把模型放到以下任一目录：
-
-```text
-ComfyUI/models/LLM/
-ComfyUI/models/llamaforge/
-```
-
-插件也会发现 ComfyUI 已注册的 `LLM` 路径和 `LLAMAFORGE_MODEL_DIRS` 指定的路径。支持子目录和分片 GGUF 的首个分片入口。
-
-使用视觉模型时，如果模型需要外置视觉投影器，请同时放入对应的 `*mmproj*.gguf` 文件。普通模型和 mmproj 会在不同的下拉选项中显示。
-
-> `engines.json`、模型文件和引擎二进制均不应上传到 GitHub；本项目已经通过 `.gitignore` 排除常见本机配置、GGUF 与缓存文件。
-
-## 四个主要节点
-
-### 1. LlamaForge · Model & Engine（模型与引擎）
-
-用于选择推理引擎、GGUF、投影器和加载配置。该节点自身**不会加载权重**，真正的模型启动发生在生成时。
-
-| 输入参数（按节点界面顺序） | 默认值 | 作用 |
-|---|---|---|
-| `engine` | 已发现引擎列表 | 选择 llama-server 版本 |
-| `model` | 已发现 GGUF 列表 | 选择文本或视觉 GGUF |
-| **`load_mmproj`** | **`true`** | 是否加载所选**独立 mmproj**；关闭则不传 `--mmproj` |
-| `mmproj` | `(auto / embedded)` | 选择独立多模态投影器；仅在开关开启且选中具体文件时加载 |
-| `gpu_layers_mode` | `manual` | 选择固定层数（Manual）或自动显存适配（Auto） |
-| `gpu_layers` | `40` | Manual 模式下的 GPU 层数；`0` 为 CPU 推理 |
-| `memory_mode` | `balanced` | 显存与进程生命周期策略 |
-| `context_size` | `8192` | 上下文窗口，会影响 KV Cache 占用 |
-| `kv_cache` | `f16` | KV 缓存精度：`f16`、`q8_0`、`q4_0` |
-| `threads` | `6` | CPU 线程数 |
-| `batch_size` | `2048` | 逻辑批处理大小 |
-| `ubatch_size` | `256` | 微批处理大小，不得超过 `batch_size` |
-| `startup_timeout` | `300` 秒 | 模型服务启动等待时间 |
-
-`mmproj` 默认的 `(auto / embedded)` 只是**不显式传入** `--mmproj`。如果模型需要独立投影器，应明确选择与该 GGUF 配套的 mmproj；插件不会替你下载或匹配模型文件。
-**独立 mmproj 加载开关：** `load_mmproj=true`（默认）保持旧版行为：仅当 `mmproj` 选择了实际文件时传递 `--mmproj`；`load_mmproj=false` 时，即使下拉框仍选着某个文件，也不会解析或加载它，适合纯文本推理和跳过独立投影器的测试。关闭开关**并不禁止**模型本身的内嵌视觉能力，也不会禁用 `Generate.image`。当开关关闭时修改 `mmproj` 选项不会触发模型重载；重新开启开关并实际使用投影器时会重载。
-
-**旧工作流兼容：** 节点控件按「引擎/模型 → 视觉 → GPU/显存 → 上下文/KV → CPU/批处理 → 启动等待」重新排序。ComfyUI 的 UI 工作流常按位置保存控件值，插件新增了自动迁移脚本，在加载旧版 10～12 项控件的 `LlamaForge · Model & Engine` 工作流时按字段含义重新排列，不会把旧的上下文数值误当作 GPU 层数；旧工作流默认保持 `load_mmproj=true`。API 工作流继续按原有字段名称传参。建议升级后首次打开旧工作流时核对控件值并重新保存。
-
-
-
-### GPU Layers：Auto 与 Manual
-
-- **Auto（`gpu_layers_mode=auto`）**：启动 llama-server 时传入 `--n-gpu-layers auto --fit on`，由支持此功能的 llama.cpp 构建根据实际空闲显存自动选取 GPU 层数。此模式**忽略 `gpu_layers` 的数字**；切换模式会重新加载模型。需要引擎的 `--help` 同时支持 `--n-gpu-layers auto` 与 `--fit`。
-- **Manual（`gpu_layers_mode=manual`）**：按原有逻辑传入固定的 `--n-gpu-layers <数值>`；`gpu_layers=0` 为 CPU-only。默认为 Manual，以保证此前工作流中的固定数值不被静默改变。
-
-如果在 Auto 模式下仅调整 `gpu_layers` 数字，运行中的模型不需要重新加载，因为这个数字不会用于启动命令。**Auto 不能保证一定加载成功**：例如模型本身过大、上下文固定得过高或其他进程占满显存时，仍可能 OOM。没有对应选项的旧版 llama.cpp 将明确报不支持 Auto，可改用 Manual 或升级引擎。
-
-### 2. LlamaForge · Generate（文本/视觉推理）
-
-这是主要推理节点：连接 `config`，填写提示词；如使用视觉模型，可额外连接 `IMAGE`。
-
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `config` | 必填 | 连接 Model & Engine 的输出 |
-| `prompt` | 示例文本 | 用户提示词 |
-| `system_prompt` | `你是一个有帮助的助手。` | 系统指令 |
-| `think` | `true` | 请求模型开启思考模式，需要模型/模板支持 |
-| `max_tokens` | `512` | 最大生成 Token 数（1～32768） |
-| `temperature` | `0.7` | 随机性/温度（0～2） |
-| `top_k` | `40` | 候选 Token 数，`0` 关闭 Top-K |
-| `top_p` | `0.95` | 核采样阈值（0～1），`1` 关闭此筛选 |
-| `min_p` | `0.05` | 最小概率过滤（0～1），`0` 关闭 |
-| `repeat_penalty` | `1.0` | 重复惩罚（0.5～3），`1.0` 不施加惩罚 |
-| `seed` | `-1` | `-1` 不显式传递随机种子；非负值设置种子 |
-| `request_timeout` | `600` 秒 | 单次推理请求超时，不含模型启动阶段 |
-| `release_after` | `false` | 推理结束后释放本扩展启动的服务进程 |
-| `image` | 未连接 | 可选 ComfyUI `IMAGE`，用于看图问答 |
-
-输出均为 `STRING`：
-
-| 输出 | 内容 |
-|---|---|
-| `text` | 模型输出的正文 |
-| `stats_json` | 引擎、模型、Token 用量、耗时、结束原因、思考模式等 JSON 统计 |
-| `reasoning` | 由服务端独立返回的思考文本；不支持或未返回时可能为空 |
-
-更换 `think` 会重启本扩展管理的 llama-server。采样参数一般在每次请求中传递，改变它们无需重新加载模型。不同模型是否支持思考关闭，取决于其聊天模板。
-
-> 如果使用旧版 ComfyUI 的**界面工作流 JSON**，升级后请检查参数显示值。旧工作流有时按控件位置保存数值，而本项目曾调整过输入顺序。
-
-### 3. LlamaForge · Release VRAM（释放显存）
-
-停止**由该扩展启动的 llama-server**，用于在后续图片/视频工作流前释放 LLM 占用的资源。可把 `Generate.text` 连接到 `after_text`，确保先生成再释放。不会停止其他程序启动的推理服务。
-
-### 4. LlamaForge · Parse Prompt JSON（解析提示词 JSON）
-
-解析模型生成的 JSON，把字段拆成独立的 `STRING` 输出：`rewritten_prompt` 与 `wh_ratio`。
-
-输入示例：
+将 `Generate.output_format` 设为 `JSON Schema`，使用或修改 `json_schema` 模板，再把 `Generate.text` 连接到 `Parse Prompt JSON.json_text`，获取适用于图像节点的独立字段：
 
 ```json
 {
@@ -191,121 +65,71 @@ ComfyUI/models/llamaforge/
 }
 ```
 
-支持纯 JSON、Markdown 代码块及前后带说明文字的 JSON。新增**三级容错**：① `strict` 严格解析；② `repaired` 尝试修复裸换行、智能引号和尾逗号；③ `fallback` 针对固定的 `rewritten_prompt`、`wh_ratio` 两个字段恢复长提示词内未转义的双引号（如 `"ChatGPT"`）。控制台会输出 `[LlamaForge JSON] parsed with strict/repaired/fallback mode` 便于诊断。保持原来的两个 `STRING` 输出接口，无需额外安装 `json-repair`。如果缺字段、字段类型错误、对象没有正确闭合或无法安全恢复，仍会报错；解析器不会擅自补完模型缺失的内容。适合连接至后续文生图工作流。
+**预设管理：** 右键 **Model & Engine** → **LlamaForge · 管理预设…**，可保存当前配置、载入、复制、重命名、删除、导入或导出 JSON。单用户模式下预设保存在 ComfyUI 用户目录 `user/llamaforge/presets.json`；启用 `--multi-user` 时按 ComfyUI 用户分别保存在 `user/<用户>/llamaforge/presets.json`。跨设备导入缺少引擎、模型或当前模式需要使用的外置 mmproj 时，需先手动映射对应资源。载入仅更新节点参数，不会自动运行推理。
 
-## 快速上手：文本生成
+## 节点功能
 
-```text
-[LlamaForge · Model & Engine]
-              │ config
-              ▼
-     [LlamaForge · Generate] ── text ──> [文本预览节点]
-                 ├── stats_json
-                 └── reasoning
-```
+| 节点 | 用途 | 输出 |
+|---|---|---|
+| **Model & Engine** | 选择本地引擎、GGUF、mmproj 和运行参数，本节点不加载权重 | `config` |
+| **Generate** | 运行或复用 llama-server，支持文本和图片理解 | `text`、`stats_json`、`reasoning` |
+| **Parse Prompt JSON** | 拆分 `rewritten_prompt` 和 `wh_ratio`，安全修复常见 JSON 格式错误 | `rewritten_prompt`、`wh_ratio` |
+| **Model Information** | 读取模型名称、架构、量化、规模、上下文、视觉元数据 | `summary`、`info_json` |
+| **Projector Matcher** | 只读比较已登记 mmproj 的 GGUF 元数据，显示候选及匹配置信度 | `summary`、`match_json` |
+| **Memory Advisor** | 粗估显存需求并给出不自动应用的配置建议 | `summary`、`analysis_json`、`recommendation_json` |
+| **Check Environment** | 预检查引擎参数、GGUF、投影器、显存及 Context 风险 | `summary`、`diagnostics_json` |
+| **Release VRAM** | 仅停止本插件启动的 llama-server 以释放资源 | `status` |
 
-1. 选择 `engine` 与 `model`，纯文本模型可关闭 `load_mmproj`，无需加载独立投影器。
-2. 在 Generate 输入 `prompt`，按需调整采样参数。
-3. 点击 ComfyUI 的 **Queue Prompt（运行队列）**。
-4. 在 `text` 输出查看结果；如需清理显存，可启用 `release_after`。
+需要分析时，将 **Model & Engine** 的 `config` 连接到 **Model Information**、**Projector Matcher**、**Memory Advisor** 或 **Check Environment** 即可；这些节点只做预检查，不加载大模型权重。
 
-## 快速上手：视觉模型看图问答
+## 常用参数
 
-```text
-[Load Image] ── IMAGE ────────────────┐
-                                     ▼
-[Model & Engine] ── config ──> [LlamaForge · Generate] ── text ──> [文本预览]
-    (视觉 GGUF + 对应 mmproj)          ▲
-                                     │
-                              prompt: 描述这张图片
-```
+**Model & Engine**
 
-1. 在 Model & Engine 中选择**支持视觉的 GGUF**，将 `load_mmproj` 设为 `true`，并按模型要求选择匹配的 `mmproj`（如视觉能力已内嵌则按模型说明配置）。
-2. 将 ComfyUI 的 **Load Image** 节点的 `IMAGE` 输出接到 `Generate.image`。
-3. 在 `prompt` 填写“描述图片里的人物和场景”等问题。
-4. 运行队列，从 `text` 查看模型回答。
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `engine`、`model` | 从列表选择 | 引擎版本与 GGUF 模型 |
+| `load_mmproj`、`mmproj` | `true`、`(auto / embedded)` | 是否加载**选中的独立** mmproj；默认不显式传投影器文件 |
+| `mmproj_mode` | `Legacy` | `Legacy` 沿用旧开关；`Auto` 元数据匹配；`Enabled` 强制使用明确选中的投影器；`Disabled` 不附加外置 mmproj |
+| `gpu_layers_mode`、`gpu_layers` | `manual`、`40` | Manual 指定 GPU 层数（`0` = 纯 CPU）；Auto 需要引擎支持自动分层与 `--fit` |
+| `memory_mode` | `balanced` | `performance` / `balanced` / `low_vram` |
+| `context_size`、`kv_cache` | `8192`、`f16` | 输入与生成共用的上下文预算；KV 类型 `f16` / `q8_0` / `q4_0` |
+| `threads` | `6` | CPU 线程数 |
+| `batch_size`、`ubatch_size` | `2048`、`256` | 批处理与微批大小，`ubatch_size` 不得大于 `batch_size` |
+| `startup_timeout` | `300` 秒 | 模型服务启动超时 |
 
-图片输入限制：
+显存模式：`performance` 保留 ComfyUI 已加载模型；`balanced` 在启动 LLM 前释放 ComfyUI 管理的模型并复用 LLM；`low_vram` 还会在每次生成后停止 llama-server。
 
-- 支持批量 **1～4 张**图片，接受 RGB、RGBA 或灰度图；RGBA 透明部分会与白色背景合成。
-- 每张原始图像像素数不得超过 **16,777,216**。
-- 自动按原始宽高比缩放，最长边不超过 **1536 像素**。
-- 每张编码后的 PNG 最大 **10 MiB**；图片在本机 CPU 上编码并以 base64 数据传给本地服务。
-- 图片输入会占用额外上下文与计算资源。纯文本模型不会因连接了图片就自动获得视觉理解能力。
+**Generate**
 
-## 模型加载成功后的四行摘要
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `prompt`、`system_prompt` | 示例文本、助手指令 | 用户提示词与系统提示词 |
+| `think` | `true` | 模型支持时开启思考；改变该项需要重新加载 LLM |
+| `max_tokens` | `512` | 输出 Token 上限，实际还受剩余上下文空间约束 |
+| `temperature`、`top_k`、`top_p`、`min_p` | `0.7`、`40`、`0.95`、`0.05` | 采样参数 |
+| `repeat_penalty`、`seed` | `1.0`、`-1` | 重复惩罚与随机种子 |
+| `request_timeout` | `600` 秒 | 单次生成请求超时 |
+| `release_after` | `false` | 生成后关闭本插件的模型服务 |
+| `image` | 未连接 | 可选 `IMAGE`，用于图片理解 |
+| `output_format` | `Text` | `Text`、`JSON`、`JSON Schema` |
+| `json_schema` | 内置提示词模板 | 仅 `JSON Schema` 模式使用，可编辑或连接 STRING |
+| `cache_mode` | `Auto` | `Auto` / `Enabled` / `Disabled`，控制提示词前缀缓存 |
+| `vram_snapshot` | `false` | 可选获取 NVIDIA 驱动显存快照，仅供参考，不等于 llama-server 进程显存 |
 
-当本插件启动的 llama-server **真正加载成功**后，ComfyUI 控制台会输出 **四行紧凑日志**：
+`json_schema` 支持常见 JSON Schema 字段，但不支持 `$ref`、`oneOf`、`anyOf` 等复杂结构。使用结构化输出时，请选择兼容的 llama.cpp 构建，并为 `max_tokens` 留足空间。 `pattern` 仅支持安全的简单正则格式（例如 `^[0-9]+:[0-9]+$`），拒绝可能导致大量回溯的写法；JSON 数值不接受 NaN、Infinity。
 
-```text
-[LlamaForge] [Model] Qwen3-VL-Q4_K_M.gguf
-[LlamaForge] [GPU]   CUDA | Auto | 26/33 层 (GPU) | 7 层 (CPU)
-[LlamaForge] [Vision] 已启用 | mmproj: mmproj-F16.gguf
-[LlamaForge] [Ready] 加载完成 | 耗时 8.6s
-```
+**Context 与思考预算：** `context_size` 由系统提示词、用户输入、图片 Token（如有）和模型生成内容（包括思考 Token）共同占用。`max_tokens` 设为与 `context_size` 相同，**不代表**还能完整输出这么多 Token。若服务端返回 `finish_reason=length` 且 JSON 不完整，应同时检查上下文与输出上限；仅调大 `max_tokens` 不一定有效。对于简短 JSON，可在模型支持时尝试 `think=false`、适当缩小输出上限，并为输入留出上下文空间。`length` 结束原因本身无法区分输出上限与上下文耗尽。
 
-> 上面是**格式示例**，不是当前机器的实际模型、层数或耗时。
+**提示词缓存：** 多次使用同一个模型与 system prompt 时，可选 `Enabled` 复用相同前缀；`Auto` 按引擎能力处理，`Disabled` 发送 `cache_prompt=false`。`stats_json.prompt_cache` 会显示服务端实际返回的缓存 Token、待处理 Token 和命中率，缺失时标为「未确认」。图片输入不复用缓存，释放服务后缓存失效，不额外启用 RAM 缓存。
 
-- **Model：** 实际成功启动的模型文件名，不输出本机私有目录路径。
-- **GPU：** 从 llama.cpp 加载日志的 `offloaded X/Y layers to GPU` 读取**实际卸载层数**，结合模型缓冲区日志判断 CUDA/Vulkan/CPU 后端。分母是 llama.cpp 报告的**可卸载层数**，某些架构包含输出层，不一定等于模型 Transformer Block 数。读取不到则显示“未确认”，不会直接拿 `gpu_layers` 配置值冒充实际层数。
-- **Vision：** 只有在加载日志同时确认视觉编码器和多模态模型加载成功时才显示“已启用”；仅配置了 `mmproj`，或日志只有模糊的多模态标记时显示“未确认”。已确认的投影器仅显示文件名。
-- **Ready：** 本地服务健康检查成功后才输出，耗时从启动 llama-server 进程算起，不包含此前 ComfyUI 模型卸载时间。
+**推理性能统计：** `Generate.stats_json.performance` 包含提示词/生成 Token、Prefill 耗时与速度、生成耗时与速度、单次请求耗时、冷启动耗时、GPU 实际卸载层数和 KV 配置；每项标明 `source`（服务端 / 客户端计时 / 配置 / 未确认）。控制台同步显示摘要。冷启动时间为进程启动到服务就绪，不等于单纯权重加载耗时；热复用不会显示虚假的加载耗时。开启 `vram_snapshot` 时显示驱动全局显存信息，而非本插件进程独占显存。
 
-同一个模型服务被复用时**不重复输出**；切换模型并成功重新加载后会再次输出四行；加载失败不会错误输出 Ready。兼容的 llama.cpp 引擎会自动启用 `--verbosity 4` 以记录真实层数与视觉编码器信息；旧版引擎若不支持该参数会保留原日志级别，此时部分字段可能显示“未确认”。使用独立只读句柄读取加载日志，不改变正在运行的 llama-server 写入日志位置；本扩展释放服务时清理临时日志文件。生成时的 Token 进度条仍照常显示。
+**Memory Advisor：** `memory_profile` 可选 `Auto`（默认）、`Performance`、`Balanced`、`Low VRAM`、`Custom`。**仅输出建议，不会自动修改 Model & Engine 参数。**
 
-## 生成进度条与统计
+## 注意事项
 
-生成期间，插件在 ComfyUI 控制台约每 **250 ms** 原地刷新一行：
-
-```text
-[LlamaForge] [███████░░░░░░░░░░░░░] 342/1024 33% | 15.8 t/s | 00:22 | ETA 00:43
-[LlamaForge] ✓ 672/1024 tokens | 17.1 t/s | 00:39 | Completed
-```
-
-- 进度表示已生成 Token / `max_tokens`；包含思考和正文的生成 Token，不包括输入提示词。
-- 生成中的 Token 数由流式片段估算，最终优先采用服务端返回的 `completion_tokens`。
-- 速度按最近约 3 秒估算，ETA 仅估算到最大 Token 数的时间。
-- 模型可以正常提前停止，因此完成时未必达到 100%。
-- 如果控制台不支持方块字符，会自动使用 ASCII 进度条。
-
-## 内存管理与常见问题
-
-### 三种内存模式
-
-- **`performance`**：加载推理服务前不主动卸载 ComfyUI 已加载的模型，适合内存/显存充裕时使用。
-- **`balanced`**：首次启动或切换推理服务时，先请求 ComfyUI 卸载已管理的模型；生成后可复用已加载的 LLM。
-- **`low_vram`**：加载前卸载 ComfyUI 模型，且**每轮生成后**停止本扩展所属 llama-server。
-
-`gpu_layers`、`context_size`、`kv_cache` 和模型量化级别都会影响显存及内存使用。`low_vram` 并不代表模型运行时不占用资源。
-
-### 典型排错
-
-**没有找到节点？** 确认插件位置正确，并彻底重启 ComfyUI 后端进程。
-
-**引擎未出现？** 检查 `engines.json` 路径及 EXE/DLL 文件，或是否将 `llama-server` 所在目录加入环境变量。
-
-**模型 / mmproj 没出现在下拉框？** 将 `.gguf` 文件放到注册的模型目录，重新加载节点或重启 ComfyUI。mmproj 只能在专用下拉框选择。
-
-**启动时提示不支持参数？** 检查引擎版本的 `llama-server --help`。当前插件要求支持 `--model`、`--host`、`--port`、`--ctx-size`、`--n-gpu-layers`、`--threads`、`--batch-size`、`--ubatch-size`、`--reasoning`；外置投影器还需 `--mmproj`。
-
-**CUDA/Vulkan 显存不足或 KV Cache 分配失败？** 插件会检测常见 OOM 日志，并在原始 llama-server 日志之前显示中文排查建议、当前 `gpu_layers_mode`、`gpu_layers`、`context_size` 和 `kv_cache`。优先尝试 `gpu_layers_mode=auto`；如果 Auto 仍失败，可以选 Manual 并降低 `gpu_layers`（例如 8、4 或 0）、减少 `context_size`（例如 2048 或 1024）、把 KV 缓存改为 `q8_0` 或 `q4_0`、减小 `batch_size` / `ubatch_size`，并尝试 `low_vram` 模式。NVIDIA 显卡通常建议优先选 CUDA 引擎而非 Vulkan 引擎。更低量化的模型也能减轻内存压力。提示**不会自动修改参数或重试**。`startup_timeout` 控制加载等待，`request_timeout` 控制推理请求超时。
-
-**图片无法识别？** 检查 GGUF 是否支持图像、`mmproj` 是否匹配，以及 llama.cpp 引擎是否支持多模态。建议先使用一张较小图片验证。
-
-**`reasoning` 为空？** 模型可能没有独立提供思考内容，或者所选聊天模板不支持该特性。
-
-**为什么模型经常重新加载？** 模型、引擎、mmproj、思考开关或加载参数变化时会重启。`release_after=true` 和 `low_vram` 也会停止进程。
-
-## 开发测试与已知限制
-
-在 **ComfyUI 根目录**执行测试命令（不要在插件目录直接运行，否则可能缺少 `folder_paths` 模块）：
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s custom_nodes/ComfyUI-LlamaForge/tests -v
-```
-
-若使用其他 Python 环境，需要保证该解释器能访问 ComfyUI 及其依赖（例如 PyTorch、Pillow、NumPy）。
-
-目前仅支持本地 GGUF 文本生成、单批最多 4 张图片的视觉理解及上述辅助功能；**不支持视频/音频直接输入，不会将每个流式 Token 作为单独的 ComfyUI 输出连接**。自动化测试通过不代表所有 GGUF 与 mmproj 组合都能真实完成视觉推理，最终取决于模型、投影器和 llama.cpp 版本的兼容性。
-
-推理服务绑定本机 `127.0.0.1`，插件不主动上传数据到第三方 API，不会下载模型或自动修改 ComfyUI 核心。请自行遵守 llama.cpp 和所选模型的许可证。
+- 选择模型时，**Model & Engine** 会自动预览 GGUF 信息。模型声明的上下文和规模标签不等于实际推理上限与精确参数量。
+- 显存预算为**粗略估算**。**Check Environment** 中的 `UNKNOWN` 表示未经验证；预检查通过不等于保证模型可加载或 mmproj 一定匹配。
+- **Generate** 会在控制台显示 Token 生成进度，`reasoning` 可能为空。将 `Generate.text` 连接到 `Release VRAM.after_text`，可以在生成后释放本插件的推理进程。
+- 启动失败时查看保留的 llama-server 日志和诊断建议。遇到 OOM 可降低 `gpu_layers`、`context_size`、`batch_size`，或尝试 `q8_0` KV、`low_vram`。升级旧工作流后，建议核对一次界面参数值。

@@ -13,8 +13,28 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from .progress import TokenProgress
+from .live_progress import GenerationCancelled
 from .load_report import model_ready_lines
 from .vision import chat_content
+from .structured_output import (PROMPT_REWRITE_SCHEMA_JSON,
+                                prepare_output_format, validate_response)
+from .prompt_cache import (CACHE_MODES, plan_prompt_cache,
+                           prompt_cache_statistics, prompt_cache_log)
+from .inference_stats import (build_inference_statistics,
+                              format_inference_statistics,
+                              runtime_device_from_logs)
+
+
+def _flags_from_help(help_text):
+    """Extract complete long-option names, never match prefix of another flag."""
+    return set(re.findall(
+        r"(?<![\w-])--[A-Za-z][A-Za-z0-9-]*(?![A-Za-z0-9-])",
+        help_text or "",
+    ))
+
+
+def _has_flag(help_text, name):
+    return name in _flags_from_help(help_text)
 
 
 def _find_free_port():
@@ -30,9 +50,9 @@ def _free_comfy_vram():
     model_management.soft_empty_cache()
 
 
-def _http_json(url, payload=None, timeout=5):
+def _http_json(url, payload=None, timeout=5, run=None):
     if isinstance(payload, dict) and payload.get("stream") is True:
-        return _http_stream_chat(url, payload, timeout)
+        return _http_stream_chat(url, payload, timeout, run=run)
     headers = {"Accept": "application/json"}
     data = None
     if payload is not None:
@@ -45,7 +65,7 @@ def _http_json(url, payload=None, timeout=5):
         return json.loads(response.read().decode("utf-8"))
 
 
-def _http_stream_chat(url, payload, timeout):
+def _http_stream_chat(url, payload, timeout, run=None):
     """Collect an OpenAI chat-completion SSE stream and render live progress.
 
     llama.cpp normally emits one content/reasoning delta per generated token.
@@ -66,6 +86,8 @@ def _http_stream_chat(url, payload, timeout):
             event_lines = []
             for raw in response:
                 line = raw.decode("utf-8-sig", errors="replace").rstrip("\r\n")
+                if run is not None:
+                    run.check_cancelled()
                 if line.startswith("data:"):
                     event_lines.append(line[5:].lstrip())
                     continue
@@ -106,10 +128,14 @@ def _http_stream_chat(url, payload, timeout):
                         reasoning_parts.append(reasoning)
                     if content or reasoning:
                         progress.on_token()
+                        if run is not None:
+                            run.on_token()
                     if choice.get("finish_reason") is not None:
                         finish_reason = choice["finish_reason"]
         if not done:
             raise RuntimeError("LlamaForge: streaming response ended before [DONE].")
+        if run is not None:
+            run.check_cancelled()
         if not usage:
             # This older-build fallback is an SSE-delta count, not exact tokenization.
             usage = {"completion_tokens": progress.count, "completion_tokens_estimated": True}
@@ -125,6 +151,36 @@ def _http_stream_chat(url, payload, timeout):
         count = usage.get("completion_tokens") if done else None
         rate = timings.get("predicted_per_second") if done else None
         progress.finish(tokens=count, predicted_per_second=rate, success=done)
+
+
+def classify_startup_failure(logs):
+    """Classify known llama-server startup failures without hiding raw logs."""
+    text = logs.casefold()
+    cases = (
+        ("GPU_OR_KV_OOM", (
+            "outofdevicememory", "out of device memory", "cuda_error_out_of_memory",
+            "failed to allocate buffer for kv cache", "failed to allocate buffer for rs cache",
+            "failed to allocate vulkan", "cudamalloc failed",
+        ), "降低 GPU 层数、Context、Batch，或尝试 q8_0 / q4_0 KV。"),
+        ("DLL_MISSING", (
+            "dll not found", "could not load library", "failed to load shared library",
+            "cannot open shared object file", "error 126",
+        ), "检查 llama-server 配套 DLL、显卡驱动与系统运行库。"),
+        ("MMPROJ_INVALID", (
+            "failed to load mmproj", "failed to load projector", "failed to load clip model",
+        ), "确认外置 mmproj 与主模型兼容，必要时关闭 load_mmproj 测试。"),
+        ("GGUF_LOAD_FAILED", (
+            "failed to load model from file", "invalid gguf", "unknown model architecture",
+        ), "检查 GGUF 文件完整性、量化类型以及引擎版本。"),
+        ("PORT_BIND_FAILED", (
+            "address already in use", "failed to bind", "only one usage of each socket address",
+        ), "检查监听地址或端口策略，再重试插件拥有的服务进程。"),
+    )
+    for code, markers, suggestion in cases:
+        if any(marker in text for marker in markers):
+            return {"code": code, "suggestion": suggestion}
+    return {"code": "STARTUP_UNKNOWN",
+            "suggestion": "查看保留的 llama-server 原始日志定位失败阶段。"}
 
 
 def _out_of_memory_hint(logs, config):
@@ -191,6 +247,11 @@ class LocalLlamaServer:
         self._signature = None
         self._port = None
         self._help_cache = {}
+        self._structured_verified = set()
+        self._active_flags = None
+        self._device_evidence = None
+        self._abort_lock = threading.Lock()
+        self._active_run = None
 
     def _load_log_snapshot(self):
         """Read bounded startup logs through a separate read-only file handle.
@@ -239,6 +300,9 @@ class LocalLlamaServer:
         self._process = None
         self._signature = None
         self._port = None
+        self._structured_verified.clear()
+        self._active_flags = None
+        self._device_evidence = None
         if process is not None:
             if process.poll() is None:
                 process.terminate()
@@ -255,18 +319,40 @@ class LocalLlamaServer:
             finally:
                 self._log = None
         if self._log_path is not None:
-            try:
-                os.unlink(self._log_path)
-            except FileNotFoundError:
-                pass
-            finally:
-                self._log_path = None
+            path = self._log_path
+            self._log_path = None
+            # Windows may release the terminated child process log handle
+            # slightly after wait() returns. Retry briefly without failing
+            # an otherwise successful cancellation or VRAM release.
+            for attempt in range(12):
+                try:
+                    os.unlink(path)
+                    break
+                except FileNotFoundError:
+                    break
+                except PermissionError:
+                    if attempt == 11:
+                        print("[LlamaForge] 无法立即清理临时服务日志（Windows 文件仍被占用）。", flush=True)
+                    else:
+                        time.sleep(0.1)
 
     def release(self):
         with self._lock:
             was_running = self._process is not None and self._process.poll() is None
             self._stop()
             return "LlamaForge: released owned llama-server." if was_running else "LlamaForge: no active server."
+
+    def abort_active(self, run):
+        """Terminate only the plugin process handling this active request."""
+        with self._abort_lock:
+            if self._active_run is not run:
+                return
+            process = self._process
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
 
     def _supported_flags(self, executable):
         stamp = (str(executable), executable.stat().st_mtime_ns, executable.stat().st_size)
@@ -287,7 +373,7 @@ class LocalLlamaServer:
             except (OSError, subprocess.TimeoutExpired) as error:
                 raise RuntimeError(f"LlamaForge: unable to inspect llama-server: {error}") from error
             help_text = result.stdout + result.stderr
-            if "--host" not in help_text or "--port" not in help_text:
+            if not all(_has_flag(help_text, name) for name in ("--host", "--port")):
                 raise RuntimeError(f"LlamaForge: {executable} is not a compatible llama-server (--help).")
             self._help_cache = {stamp: help_text}
         return self._help_cache[stamp]
@@ -311,20 +397,20 @@ class LocalLlamaServer:
         else:
             # Explicit "auto" avoids a numeric LLAMA_ARG_N_GPU_LAYERS env override.
             # The selected build must support both automatic layers and --fit.
-            declaration = re.search(
-                r"--n-gpu-layers\b([^\n]*(?:\n\s+[^\n]*){0,3})",
+            declaration = (re.search(
+                r"(?<![\w-])--n-gpu-layers(?=[\s,=:]|$)([^\n]*(?:\n\s+[^\n]*){0,3})",
                 flags, re.IGNORECASE,
-            )
+            ) if _has_flag(flags, "--n-gpu-layers") else None)
             supports_auto = bool(declaration and
                                  re.search(r"\bauto\b", declaration.group(1), re.IGNORECASE))
-            if not supports_auto or not re.search(r"--fit(?=\s|$)", flags):
+            if not supports_auto or not _has_flag(flags, "--fit"):
                 raise RuntimeError(
                     "LlamaForge: selected llama-server does not support GPU Layers Auto "
                     "(requires --n-gpu-layers auto and --fit). "
                     "Update llama.cpp or select gpu_layers_mode=manual."
                 )
         for name, _ in required:
-            if name not in flags:
+            if not _has_flag(flags, name):
                 raise RuntimeError(f"LlamaForge: selected llama.cpp version does not support {name}.")
         cmd = [str(config["engine_path"])]
         for flag, value in required:
@@ -334,32 +420,32 @@ class LocalLlamaServer:
         kv = config["kv_cache"]
         if kv != "f16":
             for flag in ("--cache-type-k", "--cache-type-v"):
-                if flag not in flags:
+                if not _has_flag(flags, flag):
                     raise RuntimeError(f"LlamaForge: selected version does not support {flag}.")
                 cmd.extend((flag, kv))
-        if "--reasoning" not in flags:
+        if not _has_flag(flags, "--reasoning"):
             raise RuntimeError("LlamaForge: selected llama.cpp version does not support --reasoning on/off.")
         cmd.extend(("--reasoning", "on" if think else "off"))
         # llama.cpp's default verbosity=3 hides actual GPU offload counts
         # and the vision-encoder flag on several modern builds. Verbosity 4
         # exposes them without requiring changes to model inference options.
         # Keep older builds compatible if the option is not advertised.
-        if re.search(r"(?:^|\s)--verbosity(?=\s|,|$)", flags):
+        if _has_flag(flags, "--verbosity"):
             cmd.extend(("--verbosity", "4"))
         mmproj = config.get("mmproj_path") if config.get("load_mmproj", True) else None
         if mmproj:
-            if "--mmproj" not in flags:
+            if not _has_flag(flags, "--mmproj"):
                 raise RuntimeError("LlamaForge: selected llama.cpp version does not support --mmproj.")
             if not Path(mmproj).is_file():
                 raise FileNotFoundError(f"LlamaForge: mmproj file not found: {mmproj}")
             cmd.extend(("--mmproj", str(mmproj)))
-        if "--no-webui" in flags:
+        if _has_flag(flags, "--no-webui"):
             cmd.append("--no-webui")
-        if "--offline" in flags:
+        if _has_flag(flags, "--offline"):
             cmd.append("--offline")
         return cmd
 
-    def _ensure_running(self, config, think=True):
+    def _ensure_running(self, config, think=True, run=None):
         identity = (
             str(config["engine_path"]),
             str(config["model_path"]),
@@ -375,14 +461,18 @@ class LocalLlamaServer:
             think,
         )
         if self._signature == identity and self._process is not None and self._process.poll() is None:
-            return
+            return None  # Warm reuse: no startup/load time for this request.
 
         self._stop()
+        if run is not None:
+            run.check_cancelled()
         flags = self._supported_flags(Path(config["engine_path"]))
         port = _find_free_port()
         command = self._command(config, port, flags, think)
         if config["memory_mode"] != "performance":
             _free_comfy_vram()
+        if run is not None:
+            run.check_cancelled()
 
         self._log = tempfile.NamedTemporaryFile(mode="w+b", delete=False)
         self._log_path = self._log.name
@@ -395,35 +485,140 @@ class LocalLlamaServer:
             self._port = port
             deadline = time.monotonic() + config["startup_timeout"]
             while time.monotonic() < deadline:
+                if run is not None:
+                    run.check_cancelled()
                 if self._process.poll() is not None:
                     raise RuntimeError(f"llama-server exited with status {self._process.returncode}")
                 try:
                     health = _http_json(f"http://127.0.0.1:{port}/health", timeout=1)
                     if health.get("status") == "ok" and self._process.poll() is None:
                         self._signature = identity
-                        lines = model_ready_lines(
-                            self._load_log_snapshot(), config,
-                            time.monotonic() - started_at,
-                        )
+                        self._active_flags = flags
+                        startup_s = time.monotonic() - started_at
+                        startup_logs = self._load_log_snapshot()
+                        self._device_evidence = runtime_device_from_logs(startup_logs)
+                        lines = model_ready_lines(startup_logs, config, startup_s)
                         print("\n".join(lines), flush=True)
-                        return
+                        return startup_s
                 except (urllib.error.URLError, TimeoutError, ValueError):
                     pass
                 time.sleep(0.25)
             raise TimeoutError(f"llama-server was not ready after {config['startup_timeout']} seconds")
+        except GenerationCancelled:
+            self._stop()
+            raise
         except (OSError, RuntimeError, TimeoutError) as error:
             logs = self._log_tail()
             hint = _out_of_memory_hint(logs, config)
+            if isinstance(error, OSError) and getattr(error, "winerror", None) in (126, 127):
+                category = {
+                    "code": "DLL_MISSING",
+                    "suggestion": "检查 llama-server 配套 DLL、显卡驱动与系统运行库。",
+                }
+            else:
+                category = classify_startup_failure(str(error) + "\n" + logs)
             self._stop()
-            raise RuntimeError(f"LlamaForge: startup failed: {error}{hint}\n{logs}") from error
+            raise RuntimeError(
+                f"LlamaForge: startup failed: {error}{hint}"
+                f"\n[LlamaForge 诊断] {category['code']}: {category['suggestion']}"
+                f"\n{logs}"
+            ) from error
+
+    def _check_structured_support(self, mode, request_timeout):
+        """Fail closed if the selected server ignores response_format.
+
+        An intentionally invalid format/schema must be rejected with a known
+        input error. A server that silently ignores it would return HTTP 200.
+        This is checked once per live server and per requested format.
+        """
+        if mode in self._structured_verified:
+            return
+
+        if mode == "JSON Schema":
+            # Validate the schema CONVERTER, not just response_format's type.
+            probe_format = {"type": "json_object",
+                            "schema": {"type": "__llamaforge_invalid_probe_type__"}}
+        else:
+            probe_format = {"type": "__llamaforge_invalid_probe_type__"}
+
+        payload = {
+            "messages": [{"role": "user", "content": "."}],
+            "stream": False,
+            "max_tokens": 1,
+            "temperature": 0,
+            "response_format": probe_format,
+        }
+        try:
+            _http_json(
+                f"http://127.0.0.1:{self._port}/v1/chat/completions",
+                payload,
+                timeout=min(20, request_timeout),
+            )
+        except urllib.error.HTTPError as error:
+            detail = error.read(1600).decode("utf-8", errors="replace").casefold()
+            accepted = (
+                error.code in (400, 422) and
+                (("schema" in detail or "unrecognized" in detail)
+                 if mode == "JSON Schema" else
+                 ("response_format" in detail or "format type" in detail))
+            )
+            if not accepted:
+                raise RuntimeError(
+                    "LlamaForge: selected llama-server did not confirm "
+                    f"{mode} response_format support "
+                    f"(probe HTTP {error.code}). Try a newer llama.cpp build."
+                ) from error
+        except (urllib.error.URLError, TimeoutError, ValueError) as error:
+            raise RuntimeError(
+                "LlamaForge: unable to verify llama.cpp structured output support: "
+                f"{error}"
+            ) from error
+        else:
+            raise RuntimeError(
+                "LlamaForge: selected llama-server silently accepted an invalid "
+                f"{mode} response_format; cannot guarantee structured output. "
+                "Use a compatible llama.cpp build or select Text."
+            )
+        self._structured_verified.add(mode)
 
     def generate(self, config, system_prompt, prompt, max_tokens, temperature, top_p, seed, request_timeout, release_after,
-                 think=True, min_p=0.05, repeat_penalty=1.0, top_k=40, image=None):
+                 think=True, min_p=0.05, repeat_penalty=1.0, top_k=40, image=None,
+                 output_format="Text", json_schema=PROMPT_REWRITE_SCHEMA_JSON,
+                 cache_mode="Auto", vram_snapshot=False, run=None):
+        # Fail early on invalid schemas/cache mode without loading model weights.
+        mode, schema, response_format = prepare_output_format(output_format, json_schema)
+        if cache_mode not in CACHE_MODES:
+            raise ValueError("LlamaForge: cache_mode must be Auto, Enabled, or Disabled.")
         with self._lock:
+            call_started = time.monotonic()
+            stopped_manually = False
+            if run is not None:
+                with self._abort_lock:
+                    self._active_run = run
+                run.set_abort(self.abort_active)
             try:
+                if run is not None:
+                    run.check_cancelled()
                 # Encode images before unloading ComfyUI-managed GPU resources.
+                # Reject explicitly requested unsupported cache *before* model startup.
+                # Even the first run may load many gigabytes into VRAM.
+                if cache_mode == "Enabled" and image is None:
+                    preflight_help = self._supported_flags(Path(config["engine_path"]))
+                    plan_prompt_cache("Enabled", preflight_help)
                 user_content = chat_content(prompt, image)
-                self._ensure_running(config, think)
+                if run is not None:
+                    run.phase("loading")
+                    model_startup_s = self._ensure_running(config, think, run=run)
+                    run.check_cancelled()
+                else:
+                    model_startup_s = self._ensure_running(config, think)
+                cache_plan = plan_prompt_cache(
+                    cache_mode, self._active_flags or "",
+                    has_image=image is not None,
+                    release_after=(release_after or config["memory_mode"] == "low_vram"),
+                )
+                if response_format is not None:
+                    self._check_structured_support(mode, request_timeout)
                 messages = []
                 if system_prompt.strip():
                     messages.append({"role": "system", "content": system_prompt})
@@ -441,28 +636,53 @@ class LocalLlamaServer:
                 }
                 if seed >= 0:
                     payload["seed"] = seed
+                if response_format is not None:
+                    payload["response_format"] = response_format
+                if cache_plan["requested"] is not None:
+                    payload["cache_prompt"] = cache_plan["requested"]
                 try:
-                    result = _http_json(
-                        f"http://127.0.0.1:{self._port}/v1/chat/completions",
-                        payload,
-                        timeout=request_timeout,
-                    )
+                    if run is not None:
+                        run.check_cancelled()
+                        run.phase("generating")
+                    request_started = time.monotonic()
+                    url = f"http://127.0.0.1:{self._port}/v1/chat/completions"
+                    if run is None:
+                        result = _http_json(url, payload, timeout=request_timeout)
+                    else:
+                        result = _http_json(url, payload, timeout=request_timeout, run=run)
+                        run.check_cancelled()
+                    request_wall_s = time.monotonic() - request_started
+                except GenerationCancelled:
+                    raise
                 except urllib.error.HTTPError as error:
                     detail = error.read(1800).decode("utf-8", errors="replace")
+                    if run is not None:
+                        run.check_cancelled()
                     hint = _out_of_memory_hint(detail + "\n" + self._log_tail(), config)
                     vision_hint = (" Check that the selected GGUF is vision-capable and its matching mmproj is configured."
                                    if image is not None and not hint else "")
-                    raise RuntimeError(f"LlamaForge: inference HTTP {error.code}: {detail}{hint}{vision_hint}") from error
-                except (urllib.error.URLError, TimeoutError) as error:
+                    format_hint = (" Selected llama.cpp build may not support the requested "
+                                   "response_format / JSON Schema; try Text or another engine."
+                                   if response_format is not None and error.code in (400, 422, 500) else "")
+                    raise RuntimeError(f"LlamaForge: inference HTTP {error.code}: {detail}{hint}{vision_hint}{format_hint}") from error
+                except (urllib.error.URLError, TimeoutError, OSError) as error:
                     logs = self._log_tail()
+                    if run is not None:
+                        run.check_cancelled()
                     hint = _out_of_memory_hint(logs, config)
                     self._stop()
                     raise RuntimeError(f"LlamaForge: server disconnected or timed out: {error}{hint}\n{logs}") from error
                 except RuntimeError as error:
                     logs = self._log_tail()
+                    if run is not None:
+                        run.check_cancelled()
                     hint = _out_of_memory_hint(logs, config)
                     self._stop()
                     raise RuntimeError(f"LlamaForge: streaming response failed: {error}{hint}\n{logs}") from error
+                except Exception:
+                    if run is not None:
+                        run.check_cancelled()
+                    raise
                 choices = result.get("choices") or []
                 if not choices or not isinstance(choices[0].get("message"), dict):
                     raise RuntimeError(f"LlamaForge: unexpected llama-server response: {str(result)[:700]}")
@@ -471,6 +691,40 @@ class LocalLlamaServer:
                 reasoning = message.get("reasoning_content") or ""
                 if not isinstance(text, str) or not isinstance(reasoning, str):
                     raise RuntimeError("LlamaForge: response content or reasoning was not text.")
+                validated = validate_response(text, mode, schema, choices[0].get("finish_reason"))
+                try:
+                    cache_stats = prompt_cache_statistics(
+                        result, cache_plan,
+                        server_released=(release_after or config["memory_mode"] == "low_vram"),
+                    )
+                except RuntimeError:
+                    # A build that ignored cache_prompt=false cannot remain a
+                    # trustworthy source for future Disabled requests.
+                    self._stop()
+                    raise
+                if cache_stats["source"] == "server_timings":
+                    print(prompt_cache_log(cache_stats), flush=True)
+                gpu_snapshot = None
+                if vram_snapshot:
+                    from .memory_advisor import probe_gpu_hardware
+                    try:
+                        gpu_snapshot = probe_gpu_hardware()
+                    except (OSError, RuntimeError, ValueError):
+                        gpu_snapshot = {"source": "unavailable", "devices": []}
+                active_device_evidence = self._device_evidence
+                # Cleanup is part of this call, not work hidden after its timer.
+                if release_after or config["memory_mode"] == "low_vram":
+                    self._stop()
+                    stopped_manually = True
+                performance = build_inference_statistics(
+                    result, config, cache_stats,
+                    request_wall_s=request_wall_s,
+                    total_call_wall_s=time.monotonic() - call_started,
+                    model_startup_s=model_startup_s,
+                    device_evidence=active_device_evidence,
+                    snapshot=gpu_snapshot,
+                )
+                print(format_inference_statistics(performance), flush=True)
                 stats = {
                     "engine": config["engine_name"],
                     "model": config["model_name"],
@@ -478,10 +732,23 @@ class LocalLlamaServer:
                     "timings": result.get("timings", {}),
                     "finish_reason": choices[0].get("finish_reason"),
                     "think": think,
+                    "output_format": mode,
+                    "structured_output_validated": validated,
+                    "structured_format_probe": "passed" if response_format is not None else "not_required",
+                    "prompt_cache": cache_stats,
+                    "performance": performance,
                 }
                 return text, json.dumps(stats, ensure_ascii=False, indent=2), reasoning
+            except GenerationCancelled:
+                self._stop()
+                raise
             finally:
-                if release_after or config["memory_mode"] == "low_vram":
+                if run is not None:
+                    run.clear_abort()
+                    with self._abort_lock:
+                        if self._active_run is run:
+                            self._active_run = None
+                if (release_after or config["memory_mode"] == "low_vram") and not stopped_manually:
                     self._stop()
 
 
