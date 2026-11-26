@@ -66,7 +66,8 @@ class FakeProcess:
 
 class RegistryTests(unittest.TestCase):
     def test_nodes_are_registered(self):
-        self.assertEqual(len(package.NODE_CLASS_MAPPINGS), 8)
+        self.assertEqual(len(package.NODE_CLASS_MAPPINGS), 9)
+        self.assertIn("LlamaForgeRemoteLoader", package.NODE_CLASS_MAPPINGS)
         self.assertIn("LlamaForgeProjectorMatcher", package.NODE_CLASS_MAPPINGS)
         self.assertIn('LlamaForgeCheckEnvironment', package.NODE_CLASS_MAPPINGS)
         self.assertIn('LlamaForgeMemoryAdvisor', package.NODE_CLASS_MAPPINGS)

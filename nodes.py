@@ -12,6 +12,7 @@ from .registry import (
     resolve_projector,
 )
 from .runtime import SERVER
+from .remote import REMOTE_SERVER, profiles, make_config, config_stamp
 from .live_progress import LiveRun, GenerationCancelled
 from .structured_output import PROMPT_REWRITE_SCHEMA_JSON
 import json
@@ -163,6 +164,37 @@ class LlamaForgeLoader:
 
 
 
+class LlamaForgeRemoteLoader:
+    """Select a remote model without loading weights or touching local VRAM."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        try:
+            entries = profiles()
+        except (ValueError, OSError, TypeError):
+            entries = {}
+        servers = list(entries) or ["(configure remote_servers.json)"]
+        models = sorted({m for p in entries.values() for m in p["models"]}) or ["(configure model alias)"]
+        return {"required": {"server": (servers,), "model": (models,)}}
+
+    RETURN_TYPES = ("LLAMAFORGE_CONFIG",)
+    RETURN_NAMES = ("config",)
+    FUNCTION = "configure"
+    CATEGORY = "LlamaForge"
+
+    @classmethod
+    def IS_CHANGED(cls, server, model):
+        return config_stamp(server, model)
+
+    def configure(self, server, model):
+        return (make_config(server, model),)
+
+
+def _require_local(config):
+    if config.get("backend") == "remote":
+        raise ValueError("LlamaForge: this diagnostic requires a local Model & Engine node. Use the remote Web console for remote diagnostics.")
+
+
 class LlamaForgeModelInformation:
     """Read model metadata only; never starts llama-server or loads weights."""
 
@@ -182,6 +214,7 @@ class LlamaForgeModelInformation:
         return float("nan")
 
     def inspect(self, config):
+        _require_local(config)
         projector = (config.get("mmproj_path")
                      if config.get("load_mmproj", True) else None)
         info = inspect_gguf(config["model_path"], projector_path=projector)
@@ -213,6 +246,7 @@ class LlamaForgeProjectorMatcher:
         return float("nan")
 
     def inspect(self, config):
+        _require_local(config)
         report = analyze_projectors(config["model_name"])
         summary = format_match(report)
         print(summary, flush=True)
@@ -248,6 +282,7 @@ class LlamaForgeMemoryAdvisor:
         return float("nan")
 
     def advise(self, config, memory_profile="Auto"):
+        _require_local(config)
         from .memory_advisor import analyze_memory, format_memory_advice
         report = analyze_memory(config, memory_profile)
         summary = format_memory_advice(report)
@@ -284,6 +319,7 @@ class LlamaForgeCheckEnvironment:
         return float("nan")
 
     def check(self, config):
+        _require_local(config)
         report = check_environment(config)
         summary = format_environment_report(report)
         diagnostics = json.dumps(report, ensure_ascii=False, indent=2)
@@ -384,7 +420,8 @@ class LlamaForgeGenerate:
                           max_tokens, server.send_sync).begin()
             structured["run"] = run
         try:
-            text, stats_json, reasoning = SERVER.generate(
+            engine = REMOTE_SERVER if config.get("backend") == "remote" else SERVER
+            text, stats_json, reasoning = engine.generate(
                 config, system_prompt, prompt, max_tokens, temperature, top_p,
                 seed, request_timeout, release_after, think=think,
                 min_p=min_p, repeat_penalty=repeat_penalty, top_k=top_k,

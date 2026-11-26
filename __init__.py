@@ -2,13 +2,15 @@
 
 from .nodes import (LlamaForgeGenerate, LlamaForgeLoader, LlamaForgeRelease,
                     LlamaForgeModelInformation, LlamaForgeMemoryAdvisor,
-                    LlamaForgeCheckEnvironment, LlamaForgeProjectorMatcher)
+                    LlamaForgeCheckEnvironment, LlamaForgeProjectorMatcher,
+                    LlamaForgeRemoteLoader)
 from .json_parser import LlamaForgePromptJSONParser
 
 WEB_DIRECTORY = "./web"
 
 NODE_CLASS_MAPPINGS = {
     "LlamaForgeLoader": LlamaForgeLoader,
+    "LlamaForgeRemoteLoader": LlamaForgeRemoteLoader,
     "LlamaForgeGenerate": LlamaForgeGenerate,
     "LlamaForgeRelease": LlamaForgeRelease,
     "LlamaForgePromptJSONParser": LlamaForgePromptJSONParser,
@@ -20,6 +22,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LlamaForgeLoader": "LlamaForge · Model & Engine",
+    "LlamaForgeRemoteLoader": "LlamaForge · Remote Model",
     "LlamaForgeGenerate": "LlamaForge · Generate",
     "LlamaForgeRelease": "LlamaForge · Release VRAM",
     "LlamaForgePromptJSONParser": "LlamaForge · Parse Prompt JSON",

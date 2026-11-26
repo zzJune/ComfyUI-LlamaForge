@@ -1,0 +1,9 @@
+{
+  "suibian": {
+    "url": "http://100.65.61.127:8080/v1",
+    "models": [
+      "sakura-i2i",
+      "sakura-t2i"
+    ]
+  }
+}
