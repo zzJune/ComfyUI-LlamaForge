@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from .progress import TokenProgress
+from .gpu_fit import DEFAULT_FIT_TARGET, validate_fit_target
 from .live_progress import GenerationCancelled
 from .load_report import model_ready_lines
 from .vision import chat_content
@@ -417,6 +418,12 @@ class LocalLlamaServer:
             cmd.extend((flag, value))
         if mode == "auto":
             cmd.extend(("--n-gpu-layers", "auto", "--fit", "on"))
+            target = validate_fit_target(config.get("fit_target", DEFAULT_FIT_TARGET))
+            if _has_flag(flags, "--fit-target"):
+                cmd.extend(("--fit-target", str(target)))
+            elif target != DEFAULT_FIT_TARGET:
+                raise RuntimeError("LlamaForge: selected llama.cpp version does not support --fit-target; "
+                                   "use the default fit_target or update llama.cpp.")
         kv = config["kv_cache"]
         if kv != "f16":
             for flag in ("--cache-type-k", "--cache-type-v"):
@@ -453,6 +460,7 @@ class LocalLlamaServer:
             config["context_size"],
             config.get("gpu_layers_mode", "manual"),
             config["gpu_layers"] if config.get("gpu_layers_mode", "manual") == "manual" else None,
+            config.get("fit_target", DEFAULT_FIT_TARGET) if config.get("gpu_layers_mode", "manual") == "auto" else None,
             config["threads"],
             config["batch_size"],
             config["ubatch_size"],

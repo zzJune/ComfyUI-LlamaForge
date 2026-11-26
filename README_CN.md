@@ -94,6 +94,7 @@
 | `load_mmproj`、`mmproj` | `true`、`(auto / embedded)` | 是否加载**选中的独立** mmproj；默认不显式传投影器文件 |
 | `mmproj_mode` | `Legacy` | `Legacy` 沿用旧开关；`Auto` 元数据匹配；`Enabled` 强制使用明确选中的投影器；`Disabled` 不附加外置 mmproj |
 | `gpu_layers_mode`、`gpu_layers` | `manual`、`40` | Manual 指定 GPU 层数（`0` = 纯 CPU）；Auto 需要引擎支持自动分层与 `--fit` |
+| `fit_target` | `1024` MiB | 仅 Auto 生效：目标剩余显存（128–65536 MiB），降低数值可能加载更多层，但会提高 OOM 风险。非默认值要求引擎支持 `--fit-target`。 |
 | `memory_mode` | `balanced` | `performance` / `balanced` / `low_vram` |
 | `context_size`、`kv_cache` | `8192`、`f16` | 输入与生成共用的上下文预算；KV 类型 `f16` / `q8_0` / `q4_0` |
 | `threads` | `6` | CPU 线程数 |

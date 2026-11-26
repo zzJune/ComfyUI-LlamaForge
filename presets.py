@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import folder_paths
+from .gpu_fit import DEFAULT_FIT_TARGET, MIN_FIT_TARGET, MAX_FIT_TARGET
 
 from .registry import (NO_PROJECTOR, available_engines, available_models,
                        available_projectors)
@@ -25,7 +26,7 @@ FIELDS = (
     "engine", "model", "load_mmproj", "mmproj",
     "gpu_layers_mode", "gpu_layers", "memory_mode",
     "context_size", "kv_cache", "threads", "batch_size",
-    "ubatch_size", "startup_timeout", "mmproj_mode",
+    "ubatch_size", "startup_timeout", "mmproj_mode", "fit_target",
 )
 DEFAULTS = {
     "load_mmproj": True,
@@ -40,9 +41,11 @@ DEFAULTS = {
     "ubatch_size": 256,
     "startup_timeout": 300,
     "mmproj_mode": "Legacy",
+    "fit_target": DEFAULT_FIT_TARGET,
 }
 INTEGER_RANGES = {
     "gpu_layers": (0, 999), "context_size": (512, 262144),
+    "fit_target": (MIN_FIT_TARGET, MAX_FIT_TARGET),
     "threads": (1, 128), "batch_size": (32, 8192),
     "ubatch_size": (32, 4096), "startup_timeout": (15, 1800),
 }

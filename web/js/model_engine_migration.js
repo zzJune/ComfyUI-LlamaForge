@@ -11,6 +11,7 @@
  * memory_mode, context_size, kv_cache, threads, batch_size,
  * ubatch_size, startup_timeout
  * P3-09 appends mmproj_mode at index 13 (Legacy by default for old workflows).
+ * fit_target is appended at index 14 (1024 MiB by default).
  */
 
 const MEMORY_MODES = new Set(["balanced", "performance", "low_vram"]);
@@ -23,7 +24,7 @@ export const LOADER_WIDGET_ORDER = Object.freeze([
     "gpu_layers_mode", "gpu_layers", "memory_mode",
     "context_size", "kv_cache",
     "threads", "batch_size", "ubatch_size",
-    "startup_timeout", "mmproj_mode",
+    "startup_timeout", "mmproj_mode", "fit_target",
 ]);
 
 export function migrateModelEngineWidgets(workflow) {

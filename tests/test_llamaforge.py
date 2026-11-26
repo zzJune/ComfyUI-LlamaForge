@@ -343,6 +343,7 @@ class GpuMemoryTests(unittest.TestCase):
     def test_loader_auto_manual_input_and_old_workflow_compatibility(self):
         inputs = nodes.LlamaForgeLoader.INPUT_TYPES()
         self.assertEqual(inputs["optional"]["gpu_layers"][1]["default"], 40)
+        self.assertEqual(inputs["optional"]["fit_target"][1]["default"], 1024)
         self.assertEqual(inputs["optional"]["gpu_layers_mode"][0], ["manual", "auto"])
         self.assertEqual(inputs["optional"]["gpu_layers_mode"][1]["default"], "manual")
         engine = Path(__file__).resolve()
@@ -353,6 +354,11 @@ class GpuMemoryTests(unittest.TestCase):
             legacy = loader.configure(*args)[0]
             self.assertEqual(legacy["gpu_layers_mode"], "manual")
             self.assertEqual(legacy["gpu_layers"], 32)
+            self.assertEqual(legacy["fit_target"], 1024)
+            self.assertEqual(loader.configure(*args, fit_target=512)[0]["fit_target"], 512)
+            for invalid in (True, 0, -1, 65537, 512.5, "512"):
+                with self.assertRaisesRegex(ValueError, "fit_target"):
+                    loader.configure(*args, fit_target=invalid)
             automatic = loader.configure(*args, gpu_layers_mode="auto")[0]
             self.assertEqual(automatic["gpu_layers_mode"], "auto")
             self.assertEqual(automatic["gpu_layers"], 32)
@@ -374,6 +380,19 @@ class GpuMemoryTests(unittest.TestCase):
         cfg.pop("gpu_layers_mode")
         legacy = runtime.LocalLlamaServer._command(cfg, 8999, FLAGS)
         self.assertEqual(legacy[legacy.index("--n-gpu-layers") + 1], "20")
+
+    def test_fit_target_command_and_legacy_engine(self):
+        cfg = dict(config(), gpu_layers_mode="auto")
+        flags = AUTO_FLAGS + "\n--fit-target N target free memory MiB\n"
+        cmd = runtime.LocalLlamaServer._command(cfg, 8999, flags)
+        self.assertEqual(cmd[cmd.index("--fit-target") + 1], "1024")
+        cfg["fit_target"] = 512
+        cmd = runtime.LocalLlamaServer._command(cfg, 8999, flags)
+        self.assertEqual(cmd[cmd.index("--fit-target") + 1], "512")
+        with self.assertRaisesRegex(RuntimeError, "--fit-target"):
+            runtime.LocalLlamaServer._command(cfg, 8999, AUTO_FLAGS)
+        cfg["gpu_layers_mode"] = "manual"
+        self.assertNotIn("--fit-target", runtime.LocalLlamaServer._command(cfg, 8999, flags))
 
     def test_auto_does_not_silently_use_unsupported_engine(self):
         cfg = config()
@@ -409,7 +428,7 @@ class GpuMemoryTests(unittest.TestCase):
                     "usage": {"completion_tokens": 1}}
 
         try:
-            with mock.patch.object(own, "_supported_flags", return_value=AUTO_FLAGS), \
+            with mock.patch.object(own, "_supported_flags", return_value=AUTO_FLAGS + "\n--fit-target N\n"), \
                     mock.patch.object(runtime, "_find_free_port", return_value=19203), \
                     mock.patch.object(runtime, "_http_json", side_effect=http), \
                     mock.patch.object(runtime, "_free_comfy_vram"), \
@@ -422,12 +441,18 @@ class GpuMemoryTests(unittest.TestCase):
                 own.generate(another, *params)
                 self.assertEqual(len(processes), 1)
                 self.assertTrue(processes[0].alive)
-                manual = dict(another, gpu_layers_mode="manual")
-                own.generate(manual, *params)
+                tuned = dict(another, fit_target=512)
+                own.generate(tuned, *params)
                 self.assertEqual(len(processes), 2)
                 self.assertFalse(processes[0].alive)
+                self.assertEqual(commands[1][commands[1].index("--fit-target") + 1], "512")
+                manual = dict(tuned, gpu_layers_mode="manual")
+                own.generate(manual, *params)
+                own.generate(dict(manual, fit_target=768), *params)
+                self.assertEqual(len(processes), 3)
+                self.assertFalse(processes[1].alive)
                 self.assertEqual(commands[0][commands[0].index("--n-gpu-layers") + 1], "auto")
-                self.assertEqual(commands[1][commands[1].index("--n-gpu-layers") + 1], "5")
+                self.assertEqual(commands[2][commands[2].index("--n-gpu-layers") + 1], "5")
         finally:
             own.release()
 
@@ -561,7 +586,7 @@ class ModelEngineMmprojToggleTests(unittest.TestCase):
         "engine", "model", "load_mmproj", "mmproj",
         "gpu_layers_mode", "gpu_layers", "memory_mode",
         "context_size", "kv_cache", "threads",
-        "batch_size", "ubatch_size", "startup_timeout", "mmproj_mode",
+        "batch_size", "ubatch_size", "startup_timeout", "mmproj_mode", "fit_target",
     ]
 
     def test_grouped_loader_widget_schema_and_default(self):

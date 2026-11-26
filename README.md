@@ -94,6 +94,7 @@ Connect the `config` output of **Model & Engine** to **Model Information**, **Pr
 | `load_mmproj` / `mmproj` | `true` / `(auto / embedded)` | Load an explicitly selected external vision projector; the default does not supply an external file |
 | `mmproj_mode` | `Legacy` | `Legacy` keeps the old controls; `Auto` matches metadata, `Enabled` forces explicit choice, `Disabled` omits external mmproj |
 | `gpu_layers_mode` / `gpu_layers` | `manual` / `40` | `manual` sets a layer count (`0` = CPU-only); `auto` requires llama.cpp support for `--fit` and automatic layers |
+| `fit_target` | `1024` MiB | Auto only: target free VRAM (128–65536 MiB); lower values may fit more layers but increase OOM risk. Non-default values require `--fit-target` support. |
 | `memory_mode` | `balanced` | `performance`, `balanced`, or `low_vram` |
 | `context_size` / `kv_cache` | `8192` / `f16` | Shared context budget for input and generated tokens; KV precision: `f16`, `q8_0`, `q4_0` |
 | `threads` | `6` | CPU threads |

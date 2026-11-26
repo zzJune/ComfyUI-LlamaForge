@@ -83,7 +83,9 @@ async function openPresetManager(node) {
         const missing = pendingMappings(cfg, state.resources);
         details.textContent = [
             "引擎：" + cfg.engine, "模型：" + cfg.model,
-            "GPU：" + cfg.gpu_layers_mode + " / " + cfg.gpu_layers,
+            "GPU：" + (cfg.gpu_layers_mode === "auto"
+                ? "auto · fit_target=" + (cfg.fit_target ?? 1024) + " MiB"
+                : "manual / " + cfg.gpu_layers),
             "Context：" + cfg.context_size + " · KV：" + cfg.kv_cache,
             "显存模式：" + cfg.memory_mode,
             "mmproj：" + (cfg.load_mmproj ? cfg.mmproj : "已禁用"),

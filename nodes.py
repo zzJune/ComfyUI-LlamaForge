@@ -12,6 +12,7 @@ from .registry import (
     resolve_projector,
 )
 from .runtime import SERVER
+from .gpu_fit import DEFAULT_FIT_TARGET, MIN_FIT_TARGET, MAX_FIT_TARGET, validate_fit_target
 from .remote import REMOTE_SERVER, profiles, make_config, config_stamp
 from .live_progress import LiveRun, GenerationCancelled
 from .structured_output import PROMPT_REWRITE_SCHEMA_JSON
@@ -71,6 +72,10 @@ class LlamaForgeLoader:
                 # Append-only to preserve 13-widget Loader workflows and old API.
                 # Legacy preserves the exact original load_mmproj + mmproj behavior.
                 "mmproj_mode": (list(MM_PROJ_MODES), {"default": "Legacy"}),
+                # Append only: existing positional workflows retain their widget indices.
+                "fit_target": ("INT", {"default": DEFAULT_FIT_TARGET, "min": MIN_FIT_TARGET,
+                                       "max": MAX_FIT_TARGET, "step": 128,
+                                       "tooltip": "Auto GPU layers only: target free VRAM in MiB; smaller values increase OOM risk."}),
             },
         }
 
@@ -113,7 +118,9 @@ class LlamaForgeLoader:
     def configure(self, engine, model, memory_mode="balanced", context_size=8192,
                   gpu_layers=40, threads=6, batch_size=2048, ubatch_size=256,
                   kv_cache="f16", startup_timeout=300, mmproj=NO_PROJECTOR,
-                  gpu_layers_mode="manual", load_mmproj=True, mmproj_mode="Legacy"):
+                  gpu_layers_mode="manual", load_mmproj=True, mmproj_mode="Legacy",
+                  fit_target=DEFAULT_FIT_TARGET):
+        fit_target = validate_fit_target(fit_target)
         if gpu_layers_mode not in ("manual", "auto"):
             raise ValueError("LlamaForge: gpu_layers_mode must be manual or auto.")
         if not isinstance(load_mmproj, bool):
@@ -150,6 +157,7 @@ class LlamaForgeLoader:
             "context_size": context_size,
             "gpu_layers": gpu_layers,
             "gpu_layers_mode": gpu_layers_mode,
+            "fit_target": fit_target,
             "threads": threads,
             "batch_size": batch_size,
             "ubatch_size": ubatch_size,

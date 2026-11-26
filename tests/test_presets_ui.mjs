@@ -23,7 +23,7 @@ const {installPresetMenu} = await import(
 const fields = [
     "engine", "model", "load_mmproj", "mmproj", "gpu_layers_mode",
     "gpu_layers", "memory_mode", "context_size", "kv_cache",
-    "threads", "batch_size", "ubatch_size", "startup_timeout", "mmproj_mode",
+    "threads", "batch_size", "ubatch_size", "startup_timeout", "mmproj_mode", "fit_target",
 ];
 const values = {
     engine: "llama-prism", model: "Sakura-Q8.gguf",
@@ -33,6 +33,7 @@ const values = {
     threads: 6, batch_size: 512, ubatch_size: 256,
     startup_timeout: 180,
     mmproj_mode: "Legacy",
+    fit_target: 1024,
 };
 function loader(options = {}) {
     const called = [];
@@ -50,7 +51,7 @@ function loader(options = {}) {
     };
 }
 
-test("copy from current Loader uses all 14 widgets, no transient UI controls", () => {
+test("copy from current Loader uses all 15 widgets, no transient UI controls", () => {
     const node = loader();
     node.widgets.push({name: "temporary_action", value: true});
     assert.deepEqual(currentPresetFromNode(node), values);
@@ -68,7 +69,7 @@ test("apply preset atomically validates before any mutation", () => {
 
 test("applying a valid preset updates widget values and normal callbacks", () => {
     const node = loader();
-    const profile = {...values, context_size: 8192, gpu_layers: 5};
+    const profile = {...values, context_size: 8192, gpu_layers: 5, fit_target: 512};
     assert.equal(applyPresetToNode(node, profile), true);
     assert.deepEqual(currentPresetFromNode(node), profile);
     assert.deepEqual(node.called.map(([name]) => name), fields);

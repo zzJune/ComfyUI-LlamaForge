@@ -37,6 +37,7 @@ CURRENT = {
     "ubatch_size": 256,
     "startup_timeout": 180,
     "mmproj_mode": "Legacy",
+    "fit_target": 1024,
 }
 MM = "relative/models/mmproj-f16.gguf"
 
@@ -68,7 +69,7 @@ class PresetStoreTests(unittest.TestCase):
     def test_existing_v1_saved_before_p3_09_loads_as_legacy(self):
         # The physical saved file is kept as-is until a user explicitly saves.
         old_config = {key: value for key, value in CURRENT.items()
-                      if key != "mmproj_mode"}
+                      if key not in ("mmproj_mode", "fit_target")}
         self.store.path.parent.mkdir(parents=True, exist_ok=True)
         self.store.path.write_text(json.dumps({
             "schema_version": 1, "presets": {"Old 13 fields": old_config},
@@ -77,6 +78,7 @@ class PresetStoreTests(unittest.TestCase):
         report = self.store.list()
         profile = report["presets"][0]
         self.assertEqual(profile["config"]["mmproj_mode"], "Legacy")
+        self.assertEqual(profile["config"]["fit_target"], 1024)
         self.assertTrue(profile["config"]["load_mmproj"])
         self.assertEqual(profile["config"]["mmproj"], NO_PROJECTOR)
         self.assertEqual(bytes_before, self.store.path.read_bytes())
@@ -160,12 +162,17 @@ class PresetStoreTests(unittest.TestCase):
         for settings in (
             {"load_mmproj": "false"}, {"context_size": True},
             {"gpu_layers": -1}, {"threads": 0}, {"batch_size": 99999},
+            {"fit_target": 127}, {"fit_target": 65537}, {"fit_target": True},
             {"ubatch_size": 513}, {"startup_timeout": 1},
             {"gpu_layers_mode": "unknown"}, {"kv_cache": "float8"},
             {"memory_mode": "fast"},
         ):
             with self.subTest(settings=settings), self.assertRaises(presets.PresetError):
                 self.save(cfg=dict(CURRENT, **settings))
+
+    def test_fit_target_round_trip(self):
+        self.save(cfg=dict(CURRENT, gpu_layers_mode="auto", fit_target=512))
+        self.assertEqual(self.store.export("Home")["config"]["fit_target"], 512)
 
     def test_projector_missing_prevents_save_when_enabled(self):
         with self.assertRaises(presets.PresetError) as raised:

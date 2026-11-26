@@ -284,7 +284,8 @@ class LoaderModesTests(MmprojMatcherTests):
             "gpu_layers", "memory_mode", "context_size", "kv_cache",
             "threads", "batch_size", "ubatch_size", "startup_timeout",
         ])
-        self.assertEqual(combined[13:], ["mmproj_mode"])
+        self.assertEqual(combined[13:], ["mmproj_mode", "fit_target"])
+        self.assertEqual(schema["optional"]["fit_target"][1]["default"], 1024)
         self.assertEqual(schema["optional"]["mmproj_mode"][1]["default"], "Legacy")
 
 
